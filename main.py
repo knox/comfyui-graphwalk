@@ -57,6 +57,7 @@ COND_PASSTHROUGH = {
     "ConditioningSetArea",
     "ConditioningSetAreaPercentage",
     "ConditioningSetMask",
+    "unCLIPConditioning",
 }
 
 TEXT_ENCODE_CLASSES = {
@@ -86,6 +87,7 @@ CHECKPOINT_CLASSES = {
 MODEL_PASSTHROUGH = {
     "LoraLoader",
     "LoraLoaderModelOnly",
+    "Lora Loader (LoraManager)",
     "Power Lora Loader (rgthree)",
     "Lora Loader Stack (rgthree)",
     "ModelMergeSimple",
@@ -94,6 +96,13 @@ MODEL_PASSTHROUGH = {
     "CLIPSetLastLayer",
     "ModelSamplingDiscrete",
     "ModelSamplingContinuousEDM",
+    "Mahiro",
+    "CFGZeroStar",
+    "Epsilon Scaling",
+    "IPAdapterFaceID",
+    "IPAdapterAdvanced",
+    "IPAdapterStyleComposition",
+    "AttentionCouplePPM",
     "FreeU",
     "FreeU_V2",
     "PerturbedAttentionGuidance",
@@ -191,8 +200,23 @@ def resolve_text(prompt: dict, ref, _seen: set | None = None) -> str:
         sep = ", " if action in ("append",) else ""
         return sep.join(parts)
 
+    # StringConcatenate (comfy-core): joins string_a and string_b with a delimiter widget
+    if class_type == "StringConcatenate":
+        delimiter = inputs.get("delimiter", " ")
+        if isinstance(delimiter, list):
+            delimiter = resolve_text(prompt, delimiter, _seen) or " "
+        parts = []
+        for key in ("string_a", "string_b"):
+            val = inputs.get(key)
+            if val is None:
+                continue
+            t = resolve_text(prompt, val, _seen)
+            if t:
+                parts.append(t)
+        return delimiter.join(parts)
+
     # Primitive / ShowText / Note and others — read direct scalar text values
-    for key in ("value", "text", "string", "populated_text"):
+    for key in ("value", "text", "string", "populated_text", "trigger_words"):
         val = inputs.get(key)
         if val is not None and not isinstance(val, list):
             return str(val)
@@ -255,6 +279,17 @@ def get_conditioning_text(prompt: dict, cond_ref, _seen: set | None = None) -> s
                 if t:
                     parts.append(t)
         return ", ".join(parts)
+
+    # ControlNetApply nodes pass conditioning through slot-matched inputs:
+    # output slot 0 = positive conditioning (input key "positive"),
+    # output slot 1 = negative conditioning (input key "negative").
+    if class_type in ("ControlNetApplyAdvanced", "ControlNetApply"):
+        out_slot = cond_ref[1] if len(cond_ref) > 1 else 0
+        follow_key = "negative" if out_slot == 1 else "positive"
+        val = inputs.get(follow_key)
+        if isinstance(val, list):
+            return get_conditioning_text(prompt, val, _seen)
+        return ""
 
     # Unknown node type with a conditioning input — follow it anyway
     for key in ("conditioning", "conditioning_1"):

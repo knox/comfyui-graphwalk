@@ -112,14 +112,18 @@ Followed recursively from a text input until a string is produced.
 | `ImpactWildcardProcessor` | reads `populated_text` (expanded wildcards at `mode='reproduce'`) |
 | `RegexReplace` | follows upstream text, then applies the regex substitution |
 | `StringFunction` / `StringFunction\|pysssss` | concatenates `text_a`, `text_b`, `text_c` |
-| Primitive / `ShowText` / `Note` / … | any node storing a scalar in `value`, `text`, or `string` |
+| `StringConcatenate` | joins `string_a` and `string_b` using the `delimiter` widget (default `" "`) |
+| Primitive / `ShowText` / `Note` / `TriggerWord Toggle` / … | any node storing a scalar in `value`, `text`, `string`, `populated_text`, or `trigger_words` |
 
 ### Conditioning
 
 - **Passthrough** (continue upstream): `Reroute` · `ConditioningSetTimestepRange` ·
-  `ConditioningSetArea` · `ConditioningSetAreaPercentage` · `ConditioningSetMask`
+  `ConditioningSetArea` · `ConditioningSetAreaPercentage` · `ConditioningSetMask` ·
+  `unCLIPConditioning`
 - **Merge** (both inputs joined): `ConditioningCombine` · `ConditioningConcat` ·
   `ConditioningAverage`
+- **Slot-aware passthrough** (output slot 0 → `positive` input, slot 1 → `negative` input):
+  `ControlNetApplyAdvanced` · `ControlNetApply`
 
 ### Model
 
@@ -127,9 +131,11 @@ Followed recursively from a text input until a string is produced.
   `CheckpointLoaderSimple` · `CheckpointLoader` · `unCLIPCheckpointLoader` ·
   `Checkpoint Loader`
 - **Passthrough** (continue upstream): `LoraLoader` · `LoraLoaderModelOnly` ·
-  `Power Lora Loader (rgthree)` · `Lora Loader Stack (rgthree)` · `ModelMergeSimple` ·
-  `ModelMergeAdd` · `ModelMergeBlocks` · `CLIPSetLastLayer` · `ModelSamplingDiscrete` ·
-  `ModelSamplingContinuousEDM` · `FreeU` · `FreeU_V2` · `PerturbedAttentionGuidance` ·
+  `Lora Loader (LoraManager)` · `Power Lora Loader (rgthree)` · `Lora Loader Stack (rgthree)` ·
+  `ModelMergeSimple` · `ModelMergeAdd` · `ModelMergeBlocks` · `CLIPSetLastLayer` ·
+  `ModelSamplingDiscrete` · `ModelSamplingContinuousEDM` · `Mahiro` · `CFGZeroStar` ·
+  `Epsilon Scaling` · `IPAdapterFaceID` · `IPAdapterAdvanced` · `IPAdapterStyleComposition` ·
+  `AttentionCouplePPM` · `FreeU` · `FreeU_V2` · `PerturbedAttentionGuidance` ·
   `SelfAttentionGuidance` · `RescaleCFG` · `DifferentialDiffusion` · `Reroute`
 
 ### Image size — latent nodes
