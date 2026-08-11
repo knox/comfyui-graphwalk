@@ -22,10 +22,18 @@ from pathlib import Path
 
 from scripts.iib.parsers.model import ImageGenerationInfo, ImageGenerationParams
 from scripts.iib.tool import (
-    is_img_created_by_comfyui,
     parse_generation_parameters,
     find,
 )
+
+# ``is_img_created_by_comfyui`` lives in ``scripts.iib.tool`` on older IIB
+# (≤ v1.8.0) but was moved to ``scripts.iib.parsers.comfyui`` in newer versions.
+# Import defensively so the plugin loads across both — otherwise the whole
+# import fails and IIB silently falls back to its built-in ComfyUI parser.
+try:
+    from scripts.iib.tool import is_img_created_by_comfyui
+except ImportError:
+    from scripts.iib.parsers.comfyui import is_img_created_by_comfyui
 
 # Private IIB helper used only for the non-standard EXIF fallback. It carries a
 # leading underscore, so it may be renamed or removed across IIB versions — import
