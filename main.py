@@ -439,6 +439,101 @@ def resolve_model_name(prompt: dict, model_ref, _seen: set | None = None) -> str
     return ""
 
 
+# Matches a <lora:name:weight> tag, used to read LoRAs out of nodes that store
+# them as A1111-style text (e.g. the LoraManager loader's ``text`` widget).
+_LORA_TAG_RE = re.compile(r"<lora:([^:>]+):([\d.]+)>", re.IGNORECASE)
+
+
+def _node_loras(prompt: dict, class_type: str, inputs: dict):
+    """
+    Extract (lora_name, weight) pairs configured directly on a single node.
+    Handles the common ComfyUI LoRA-loader variants.
+    """
+    out = []
+
+    # rgthree Power Lora Loader: one entry per ``lora_N`` key, each a dict
+    # {"on": bool, "lora": name, "strength": weight}.
+    if class_type == "Power Lora Loader (rgthree)":
+        for key, val in inputs.items():
+            if not re.fullmatch(r"lora_\d+", key) or not isinstance(val, dict):
+                continue
+            name = val.get("lora")
+            if val.get("on", True) and isinstance(name, str) and name.lower() != "none":
+                out.append((name, val.get("strength", 1.0)))
+        return out
+
+    # Core LoraLoader / LoraLoaderModelOnly and LoraManager's single loader.
+    if class_type in ("LoraLoader", "LoraLoaderModelOnly", "Lora Loader (LoraManager)"):
+        name = get_scalar(prompt, inputs, "lora_name")
+        if isinstance(name, str) and name.lower() != "none":
+            weight = inputs.get("strength_model")
+            if weight is None:
+                weight = inputs.get("strength", 1.0)
+            out.append((name, weight))
+
+    # rgthree Lora Loader Stack: lora_1..N / strength_1..N, "None" = empty slot.
+    if class_type == "Lora Loader Stack (rgthree)":
+        i = 1
+        while f"lora_{i}" in inputs:
+            name = inputs.get(f"lora_{i}")
+            if isinstance(name, str) and name.lower() != "none":
+                out.append((name, inputs.get(f"strength_{i}", 1.0)))
+            i += 1
+
+    # LoraManager loader may also carry <lora:...> tags in its ``text`` widget.
+    if class_type == "Lora Loader (LoraManager)":
+        text = inputs.get("text")
+        if isinstance(text, str):
+            for m in _LORA_TAG_RE.finditer(text):
+                out.append((m.group(1), float(m.group(2))))
+
+    return out
+
+
+def collect_loras(prompt: dict, model_ref, _seen: set | None = None):
+    """
+    Walk the model edge backwards (like resolve_model_name) and collect every
+    LoRA applied along the chain as (name, weight) pairs, de-duplicated by the
+    filename stem (first weight wins).
+    """
+    if not isinstance(model_ref, list):
+        return []
+    if _seen is None:
+        _seen = set()
+
+    node_id = str(model_ref[0])
+    if node_id in _seen:
+        return []
+    _seen = _seen | {node_id}
+
+    node = _node(prompt, node_id)
+    if not node:
+        return []
+
+    class_type = node.get("class_type", "")
+    inputs = node.get("inputs", {})
+
+    loras = list(_node_loras(prompt, class_type, inputs))
+
+    if class_type == "Reroute":
+        sub = inputs.get("*")
+    else:
+        sub = _switch_selected(prompt, class_type, inputs) or inputs.get("model")
+    if isinstance(sub, list):
+        loras.extend(collect_loras(prompt, sub, _seen))
+
+    # De-duplicate by stem, preserving first occurrence.
+    result = []
+    seen_stems = set()
+    for name, weight in loras:
+        stem = Path(name).stem.lower()
+        if stem in seen_stems:
+            continue
+        seen_stems.add(stem)
+        result.append((name, weight))
+    return result
+
+
 def get_scalar(prompt: dict, inputs: dict, key: str, _seen: set | None = None):
     """
     Read a scalar input value, following graph-edge references.
@@ -604,6 +699,7 @@ def extract_from_prompt(prompt: dict) -> dict | None:
 
     model_name = resolve_model_name(prompt, inputs.get("model"))
     width, height = resolve_latent_size(prompt, inputs.get("latent_image"))
+    loras = collect_loras(prompt, inputs.get("model"))
 
     return {
         "positive": positive,
@@ -616,6 +712,7 @@ def extract_from_prompt(prompt: dict) -> dict | None:
         "model_name": model_name,
         "width": width,
         "height": height,
+        "loras": loras,
     }
 
 
@@ -624,12 +721,30 @@ def extract_from_prompt(prompt: dict) -> dict | None:
 # ---------------------------------------------------------------------------
 
 
+def _lora_tags(loras) -> str:
+    """Render collected LoRAs as A1111 ``<lora:name:weight>`` tags. IIB (and its
+    webui "Resources" panel) reads LoRAs from these prompt tags, so emitting them
+    surfaces the graph's LoRAs the same way A1111 metadata would."""
+    tags = []
+    for name, weight in loras or []:
+        try:
+            w = f"{float(weight):g}"
+        except (TypeError, ValueError):
+            w = "1"
+        tags.append(f"<lora:{Path(name).stem}:{w}>")
+    return " ".join(tags)
+
+
 def format_a1111(info: dict) -> str:
     """Format extracted generation fields as an A1111-style parameters string."""
     lines = []
 
-    if info.get("positive"):
-        lines.append(info["positive"].strip())
+    positive = (info.get("positive") or "").strip()
+    lora_tags = _lora_tags(info.get("loras"))
+    if lora_tags:
+        positive = f"{positive} {lora_tags}".strip()
+    if positive:
+        lines.append(positive)
 
     neg = (info.get("negative") or "").strip()
     if neg:

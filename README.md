@@ -155,6 +155,21 @@ upstream nodes. The resolver carries the *name* of the field being resolved so i
   nodes on the model edge follow their selected branch. `MODEL_PASSTHROUGH` in
   [main.py](main.py) remains only as a reference list of commonly-seen classes.
 
+### LoRAs — the webui "Resources" panel
+
+The model chain is also walked to collect every applied LoRA, which is emitted as
+A1111-style `<lora:name:weight>` tags appended to the positive prompt. IIB reads
+LoRAs from these tags, so they populate the image-info **Resources** list (and become
+searchable LoRA tags) — otherwise empty for ComfyUI images, since ComfyUI keeps LoRAs
+in loader nodes rather than in the prompt text. LoRA-loader nodes understood:
+
+- `Power Lora Loader (rgthree)` (per-slot `lora_N` = `{on, lora, strength}`) ·
+  `LoraLoader` · `LoraLoaderModelOnly` · `Lora Loader Stack (rgthree)` ·
+  `Lora Loader (LoraManager)` (incl. `<lora:…>` tags in its `text` widget)
+
+Names are de-duplicated by filename stem. Embeddings are not a resource type in IIB;
+they remain inline in the prompt as `embedding:name` (the A1111 form).
+
 ### Image size — latent nodes
 
 Width/height read from `EmptyLatentImage` · `EmptySD3LatentImage` ·
