@@ -113,6 +113,8 @@ Followed recursively from a text input until a string is produced.
 | `RegexReplace` | follows upstream text, then applies the regex substitution |
 | `StringFunction` / `StringFunction\|pysssss` | concatenates `text_a`, `text_b`, `text_c` |
 | `StringConcatenate` | joins `string_a` and `string_b` using the `delimiter` widget (default `" "`) |
+| Any `*Switch` node | follows the branch chosen by `select` (falls back to the first connected input) |
+| Display passthrough — `easy showAnything` · `ShowText\|pysssss` · `Display Any (rgthree)` / … | reads the cached `text`/`value`/`string` widget, else follows the passthrough input |
 | Primitive / `ShowText` / `Note` / `TriggerWord Toggle` / … | any node storing a scalar in `value`, `text`, `string`, `populated_text`, or `trigger_words` |
 
 ### Conditioning
@@ -125,18 +127,32 @@ Followed recursively from a text input until a string is produced.
 - **Slot-aware passthrough** (output slot 0 → `positive` input, slot 1 → `negative` input):
   `ControlNetApplyAdvanced` · `ControlNetApply`
 
+### Sampler scalars — seed / steps / CFG / sampler / scheduler
+
+Read from the sampler's own widgets, or resolved along graph edges when wired from
+upstream nodes. The resolver carries the *name* of the field being resolved so it can:
+
+- follow `*Switch` nodes (selected branch) and Primitive / `Seed (rgthree)` / `easy int`
+  / `easy float` scalar sources;
+- match a widget on the target node that is **named like the requested field** — this
+  handles aggregator / pipe nodes such as `Input Parameters (Image Saver)`, where
+  `KSampler.steps` points at an output slot but the value lives in a widget literally
+  called `steps` (likewise `cfg`, `seed`, …);
+- read the cached widget of a display passthrough (`easy showAnything`, `ShowText`, …),
+  e.g. a `sampler_name` routed through a preview node.
+
 ### Model
 
-- **Checkpoint loaders** (terminus, returns `ckpt_name` / `unet_name`):
+- **Checkpoint loaders** (terminus, returns `ckpt_name` / `unet_name` / `model_name`):
   `CheckpointLoaderSimple` · `CheckpointLoader` · `unCLIPCheckpointLoader` ·
   `Checkpoint Loader`
-- **Passthrough** (continue upstream): `LoraLoader` · `LoraLoaderModelOnly` ·
-  `Lora Loader (LoraManager)` · `Power Lora Loader (rgthree)` · `Lora Loader Stack (rgthree)` ·
-  `ModelMergeSimple` · `ModelMergeAdd` · `ModelMergeBlocks` · `CLIPSetLastLayer` ·
-  `ModelSamplingDiscrete` · `ModelSamplingContinuousEDM` · `Mahiro` · `CFGZeroStar` ·
-  `Epsilon Scaling` · `IPAdapterFaceID` · `IPAdapterAdvanced` · `IPAdapterStyleComposition` ·
-  `AttentionCouplePPM` · `FreeU` · `FreeU_V2` · `PerturbedAttentionGuidance` ·
-  `SelfAttentionGuidance` · `RescaleCFG` · `DifferentialDiffusion` · `Reroute`
+- **Passthrough** (continue upstream): **any** node carrying a `model` edge is followed
+  generically — no whitelist. This covers LoRA loaders, model merges, model patchers
+  (`CLIPSetLastLayer`, `ModelSamplingDiscrete`, `FreeU`, `RescaleCFG`,
+  `DifferentialDiffusion`, …), CLIP-conditioning patchers (`CLIPNegPip`), IPAdapter
+  variants and `Reroute`, plus any future node that merely forwards the model. Switch
+  nodes on the model edge follow their selected branch. `MODEL_PASSTHROUGH` in
+  [main.py](main.py) remains only as a reference list of commonly-seen classes.
 
 ### Image size — latent nodes
 
@@ -152,7 +168,8 @@ the active branch.
 Most gaps are fixed by adding a class name to the right set near the top of
 [main.py](main.py) — no new logic needed if the node merely passes a signal through:
 
-- pure model passthrough (e.g. another LoRA loader) → `MODEL_PASSTHROUGH`
+- pure model passthrough (e.g. another LoRA loader) → already handled (any `model`
+  edge is followed generically); no change needed
 - conditioning passthrough / merge → `COND_PASSTHROUGH` / `COND_COMBINE`
 - another CLIP text encoder → `TEXT_ENCODE_CLASSES`
 - a sampler variant → `SAMPLER_CLASSES`

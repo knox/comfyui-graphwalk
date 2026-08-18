@@ -91,7 +91,10 @@ CHECKPOINT_CLASSES = {
     "Checkpoint Loader",
 }
 
-# Nodes that forward the model output — traverse these back to the checkpoint loader
+# Reference list of nodes that forward the model output on a ``model`` edge.
+# ``resolve_model_name`` no longer gates on this set — it follows any ``model`` edge
+# generically so unknown patchers are traversed too — but the list is kept as
+# documentation of the commonly-seen model-passthrough classes.
 MODEL_PASSTHROUGH = {
     "LoraLoader",
     "LoraLoaderModelOnly",
@@ -127,6 +130,20 @@ LATENT_SIZE_CLASSES = {
     "EmptyHunyuanLatentVideo",
 }
 
+# Display / debug nodes that echo an upstream value into a cached widget and pass
+# it through unchanged. When resolving through them we read the cached widget (the
+# last-run value, reliable for reproduced images) or follow the passthrough input.
+SHOW_PASSTHROUGH = {
+    "easy showAnything",
+    "ShowText|pysssss",
+    "ShowText",
+    "Display Any (rgthree)",
+    "DisplayAny",
+    "PreviewAny",
+    "Display Int (rgthree)",
+    "Display Float (rgthree)",
+}
+
 # ---------------------------------------------------------------------------
 # Graph-walk helpers
 # ---------------------------------------------------------------------------
@@ -134,6 +151,37 @@ LATENT_SIZE_CLASSES = {
 
 def _node(prompt: dict, node_id):
     return prompt.get(str(node_id))
+
+
+def _is_switch(class_type: str) -> bool:
+    """True for the various ComfyUI *Switch nodes (ImpactSwitch, Any Switch, …)."""
+    return "Switch" in class_type
+
+
+def _switch_selected(prompt: dict, class_type: str, inputs: dict):
+    """
+    For a Switch node, return the graph-edge reference of the selected input
+    (``input{select}``, 1-based). Falls back to the first connected ``input*``
+    when ``select`` can't be resolved. Returns None for non-switch nodes.
+    """
+    if not _is_switch(class_type):
+        return None
+    select = inputs.get("select", 1)
+    if isinstance(select, list):
+        select = get_scalar(prompt, inputs, "select") or 1
+    try:
+        select = int(select)
+    except (TypeError, ValueError):
+        select = 1
+    val = inputs.get(f"input{select}")
+    if isinstance(val, list):
+        return val
+    # Fallback: first connected input slot when 'select' points at an empty one.
+    for i in range(1, 32):
+        val = inputs.get(f"input{i}")
+        if isinstance(val, list):
+            return val
+    return None
 
 
 def resolve_text(prompt: dict, ref, _seen: set | None = None) -> str:
@@ -165,6 +213,23 @@ def resolve_text(prompt: dict, ref, _seen: set | None = None) -> str:
 
     if class_type == "Reroute":
         return resolve_text(prompt, inputs.get("*"), _seen)
+
+    # Switch nodes (ImpactSwitch, Any Switch, …): follow the selected branch.
+    sel = _switch_selected(prompt, class_type, inputs)
+    if sel is not None:
+        return resolve_text(prompt, sel, _seen)
+
+    # Display / debug passthrough (easy showAnything, ShowText, …): the resolved
+    # value is cached in a text widget; fall back to the passthrough input edge.
+    if class_type in SHOW_PASSTHROUGH:
+        for key in ("text", "value", "string"):
+            val = inputs.get(key)
+            if isinstance(val, str) and val:
+                return val
+        for key in ("anything", "source", "input", "value", "text"):
+            val = inputs.get(key)
+            if isinstance(val, list):
+                return resolve_text(prompt, val, _seen)
 
     # ImpactWildcardProcessor (ComfyUI-Impact-Pack):
     # 'populated_text' holds the already-resolved wildcard text (when mode='reproduce')
@@ -269,6 +334,11 @@ def get_conditioning_text(prompt: dict, cond_ref, _seen: set | None = None) -> s
                 parts.append(t)
         return "\n".join(parts) if parts else ""
 
+    # Switch nodes routing conditioning — follow the selected branch.
+    sel = _switch_selected(prompt, class_type, inputs)
+    if sel is not None:
+        return get_conditioning_text(prompt, sel, _seen)
+
     # Pure passthrough (Reroute, ConditioningSetX…) — follow the conditioning input
     if class_type in COND_PASSTHROUGH:
         for key in ("*", "conditioning"):
@@ -332,32 +402,92 @@ def resolve_model_name(prompt: dict, model_ref, _seen: set | None = None) -> str
 
     if class_type in CHECKPOINT_CLASSES:
         return inputs.get("ckpt_name") or inputs.get("unet_name") or ""
+    # Some loaders expose the model under a different widget without being a
+    # dedicated checkpoint class — honour those names when present.
+    for key in ("ckpt_name", "unet_name", "model_name"):
+        val = inputs.get(key)
+        if isinstance(val, str) and val:
+            return val
 
-    if class_type in MODEL_PASSTHROUGH:
-        sub = inputs.get("model")
-        if isinstance(sub, list):
-            return resolve_model_name(prompt, sub, _seen)
+    # Otherwise treat any node carrying a model edge as a passthrough (LoRA
+    # loaders, model patchers, CLIP*Pip, IPAdapter, samplers-config, …) and keep
+    # walking. This is deliberately generic: rather than whitelisting every
+    # model-patching node, follow the ``model`` input back to the loader.
+    sel = _switch_selected(prompt, class_type, inputs)
+    if sel is not None:
+        return resolve_model_name(prompt, sel, _seen)
+
+    sub = inputs.get("*") if class_type == "Reroute" else inputs.get("model")
+    if isinstance(sub, list):
+        return resolve_model_name(prompt, sub, _seen)
 
     return ""
 
 
-def get_scalar(prompt: dict, inputs: dict, key: str):
+def get_scalar(prompt: dict, inputs: dict, key: str, _seen: set | None = None):
     """
-    Read a scalar input value, following graph-edge references (e.g. from a Primitive node).
+    Read a scalar input value, following graph-edge references.
+
+    ``key`` is the *name of the input we are resolving* (e.g. "steps", "cfg",
+    "sampler_name"). It is carried through the walk so that multi-output source
+    nodes — which key their widgets by name, not by output slot — can be resolved
+    by matching that name. This handles aggregator nodes such as
+    ``Input Parameters (Image Saver)`` where ``KSampler.steps`` points at output
+    slot 1 but the value lives in a widget literally called ``steps``.
     """
-    val = inputs.get(key)
+    return _resolve_scalar(prompt, inputs.get(key), key, _seen)
+
+
+def _resolve_scalar(prompt: dict, val, key: str, _seen: set | None = None):
     if val is None:
         return None
-    if isinstance(val, list):
-        node = _node(prompt, val[0])
-        if node:
-            sub = node.get("inputs", {})
-            for k in ("value", "int", "float", "seed", "number"):
-                v = sub.get(k)
-                if v is not None and not isinstance(v, list):
-                    return v
+    if not isinstance(val, list):
+        return val
+
+    if _seen is None:
+        _seen = set()
+    node_id = str(val[0])
+    if node_id in _seen:
         return None
-    return val
+    _seen = _seen | {node_id}
+
+    node = _node(prompt, node_id)
+    if not node:
+        return None
+
+    class_type = node.get("class_type", "")
+    sub = node.get("inputs", {})
+
+    # Switch — follow the selected branch, keeping the same requested key.
+    sel = _switch_selected(prompt, class_type, sub)
+    if sel is not None:
+        return _resolve_scalar(prompt, sel, key, _seen)
+
+    # A widget named exactly like the input we're after (aggregator/pipe nodes).
+    if key in sub:
+        return _resolve_scalar(prompt, sub[key], key, _seen)
+
+    # Display / debug passthrough — read the cached widget or follow the input.
+    if class_type in SHOW_PASSTHROUGH:
+        for k in ("text", "value", "int", "float", "string"):
+            v = sub.get(k)
+            if v is not None and not isinstance(v, list):
+                return v
+        for k in ("anything", "source", "input", "value", "text"):
+            v = sub.get(k)
+            if isinstance(v, list):
+                return _resolve_scalar(prompt, v, key, _seen)
+
+    # Generic scalar source (Primitive, Seed, easy int/float, …).
+    for k in ("value", "int", "float", "seed", "number", "result"):
+        v = sub.get(k)
+        if v is not None and not isinstance(v, list):
+            return v
+        if isinstance(v, list):
+            r = _resolve_scalar(prompt, v, key, _seen)
+            if r is not None:
+                return r
+    return None
 
 
 def resolve_latent_size(prompt: dict, latent_ref, _seen: set | None = None):
@@ -389,23 +519,17 @@ def resolve_latent_size(prompt: dict, latent_ref, _seen: set | None = None):
     if class_type == "Reroute":
         return resolve_latent_size(prompt, inputs.get("*"), _seen)
 
-    # ImpactSwitch / Any Switch: 1-based 'select' index determines which input to follow
-    if "Switch" in class_type or class_type in ("ImpactSwitch", "ImpactInversedSwitch"):
-        select = inputs.get("select", 1)
-        if isinstance(select, list):
-            select = get_scalar(prompt, inputs, "select") or 1
-        try:
-            select = int(select)
-        except (TypeError, ValueError):
-            select = 1
-        val = inputs.get(f"input{select}")
+    # ImpactSwitch / Any Switch: follow the selected branch.
+    sel = _switch_selected(prompt, class_type, inputs)
+    if sel is not None:
+        return resolve_latent_size(prompt, sel, _seen)
+
+    # Latent-passthrough nodes (upscale, VAE round-trips, samplers, …) keep the
+    # resolution — follow the first latent-carrying edge back to its source.
+    for key in ("latent", "latent_image", "samples", "LATENT"):
+        val = inputs.get(key)
         if isinstance(val, list):
             return resolve_latent_size(prompt, val, _seen)
-        # Fallback: try the first available input* field when 'select' cannot be resolved
-        for i in range(1, 5):
-            val = inputs.get(f"input{i}")
-            if isinstance(val, list):
-                return resolve_latent_size(prompt, val, _seen)
 
     return None, None
 
