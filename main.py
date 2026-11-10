@@ -130,6 +130,9 @@ LATENT_SIZE_CLASSES = {
     "EmptyHunyuanLatentVideo",
 }
 
+# A "W×H" / "WxH" size inside a label, e.g. "Portrait 2:3 · 1152×1728 · 1.9 MP".
+SIZE_IN_LABEL = re.compile(r"(\d+)\s*[×x]\s*(\d+)")
+
 # Display / debug nodes that echo an upstream value into a cached widget and pass
 # it through unchanged. When resolving through them we read the cached widget (the
 # last-run value, reliable for reproduced images) or follow the passthrough input.
@@ -142,6 +145,14 @@ SHOW_PASSTHROUGH = {
     "PreviewAny",
     "Display Int (rgthree)",
     "Display Float (rgthree)",
+}
+
+# Nodes that output one of their own text inputs unchanged, mapped to that input's
+# name. For inputs not covered by the generic text keys in resolve_text's fallback
+# ("value", "text", …) whose name can't be added there because it means something
+# else on other nodes (TextGenerate's 'prompt' is the LLM's input, not its output).
+TEXT_PASSTHROUGH = {
+    "LLMPromptEnhancer": "prompt",
 }
 
 # ---------------------------------------------------------------------------
@@ -287,6 +298,10 @@ def resolve_text(prompt: dict, ref, _seen: set | None = None) -> str:
             if t:
                 parts.append(t)
         return delimiter.join(parts)
+
+    # Nodes that output one of their text inputs unchanged (see TEXT_PASSTHROUGH).
+    if class_type in TEXT_PASSTHROUGH:
+        return resolve_text(prompt, inputs.get(TEXT_PASSTHROUGH[class_type]), _seen)
 
     # Primitive / ShowText / Note and others — read direct scalar text values
     for key in ("value", "text", "string", "populated_text", "trigger_words"):
@@ -477,6 +492,21 @@ def _resolve_scalar(prompt: dict, val, key: str, _seen: set | None = None):
             v = sub.get(k)
             if isinstance(v, list):
                 return _resolve_scalar(prompt, v, key, _seen)
+
+    # Size pickers without width/height widgets: take the first "W×H" from a string
+    # widget (preset label such as "Portrait 2:3 · 1152×1728 · 1.9 MP"); otherwise a
+    # widget whose name contains the requested key (custom_width / custom_height).
+    # Only literal strings are scanned, linked inputs are not followed.
+    if key in ("width", "height"):
+        for v in sub.values():
+            size = SIZE_IN_LABEL.search(v) if isinstance(v, str) else None
+            if size:
+                return int(size.group(1 if key == "width" else 2))
+        for k, v in sub.items():
+            if key in k:
+                r = _resolve_scalar(prompt, v, k, _seen)
+                if r is not None:
+                    return r
 
     # Generic scalar source (Primitive, Seed, easy int/float, …).
     for k in ("value", "int", "float", "seed", "number", "result"):

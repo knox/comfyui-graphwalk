@@ -113,6 +113,7 @@ Followed recursively from a text input until a string is produced.
 | `RegexReplace` | follows upstream text, then applies the regex substitution |
 | `StringFunction` / `StringFunction\|pysssss` | concatenates `text_a`, `text_b`, `text_c` |
 | `StringConcatenate` | joins `string_a` and `string_b` using the `delimiter` widget (default `" "`) |
+| Nodes in `TEXT_PASSTHROUGH` | output one of their own text inputs unchanged; the map (class → input name) at the top of [main.py](main.py) names which input is read |
 | Any `*Switch` node | follows the branch chosen by `select` (falls back to the first connected input) |
 | Display passthrough — `easy showAnything` · `ShowText\|pysssss` · `Display Any (rgthree)` / … | reads the cached `text`/`value`/`string` widget, else follows the passthrough input |
 | Primitive / `ShowText` / `Note` / `TriggerWord Toggle` / … | any node storing a scalar in `value`, `text`, `string`, `populated_text`, or `trigger_words` |
@@ -159,6 +160,12 @@ upstream nodes. The resolver carries the *name* of the field being resolved so i
 Width/height read from `EmptyLatentImage` · `EmptySD3LatentImage` ·
 `EmptyHunyuanLatentVideo` (direct or Primitive-referenced scalars).
 
+When width/height are wired from a size-picker node without `width`/`height` widgets,
+the size is read from the first `W×H` / `WxH` in one of its string widgets (e.g. a
+preset label `Portrait 2:3 · 1152×1728 · 1.9 MP`); without one, a widget whose name
+contains `width` / `height` (e.g. `custom_width`) is used. Pickers that compute the
+size from aspect ratio and megapixels are not covered.
+
 `Reroute` and any switch node whose class name contains `Switch` (e.g. `ImpactSwitch`,
 `ImpactInversedSwitch`) are followed automatically, using the `select` input to pick
 the active branch.
@@ -174,6 +181,8 @@ Most gaps are fixed by adding a class name to the right set near the top of
 - another CLIP text encoder → `TEXT_ENCODE_CLASSES`
 - a sampler variant → `SAMPLER_CLASSES`
 - an empty-latent variant → `LATENT_SIZE_CLASSES`
+- a node that outputs one of its text inputs unchanged → `TEXT_PASSTHROUGH`
+  (class → input name)
 
 Nodes that transform text (concatenate, regex, wildcards, …) need a dedicated branch in
 `resolve_text`. PRs welcome.
