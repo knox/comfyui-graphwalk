@@ -439,9 +439,75 @@ def resolve_model_name(prompt: dict, model_ref, _seen: set | None = None) -> str
     return ""
 
 
-# Matches a <lora:name:weight> tag, used to read LoRAs out of nodes that store
-# them as A1111-style text (e.g. the LoraManager loader's ``text`` widget).
-_LORA_TAG_RE = re.compile(r"<lora:([^:>]+):([\d.]+)>", re.IGNORECASE)
+# Matches <lora:name:weight> and <lora:name:model_weight:clip_weight> (same
+# pattern as LoraManager's parse_lora_syntax); only the model weight is kept.
+_LORA_TAG_RE = re.compile(r"<lora:([^:>]+):([^:>]+)(?::[^:>]+)?>", re.IGNORECASE)
+
+# Weight-file extensions stripped from LoRA names. Not Path.stem: LoraManager
+# names carry no extension, so a dot inside the name ("v1.5") must survive.
+_LORA_EXTENSIONS = (".safetensors", ".ckpt", ".pt", ".pth", ".bin")
+
+LM_LOADER = "Lora Loader (LoraManager)"
+LM_TEXT_LOADER = "LoRA Text Loader (LoraManager)"
+LM_STACKER = "Lora Stacker (LoraManager)"
+
+
+def _lora_stem(name: str) -> str:
+    """Base name of a LoRA without folder and weight-file extension."""
+    base = re.split(r"[\\/]", name.strip())[-1]
+    if base.lower().endswith(_LORA_EXTENSIONS):
+        base = base.rsplit(".", 1)[0]
+    return base
+
+
+def _lora_tags_in_text(text: str):
+    """(name, model_weight) pairs from <lora:…> tags in a text."""
+    out = []
+    for m in _LORA_TAG_RE.finditer(text):
+        try:
+            out.append((m.group(1).strip(), float(m.group(2))))
+        except ValueError:
+            continue
+    return out
+
+
+def _lm_widget_loras(loras):
+    """
+    Active entries of a LoraManager ``loras`` widget, or None when the widget is
+    missing or unreadable. Mirrors LoraManager's own loading: only entries with
+    ``active: true`` are applied, the list may be wrapped as {"__value__": [...]}.
+    """
+    if isinstance(loras, dict):
+        loras = loras.get("__value__")
+    if not isinstance(loras, list):
+        return None
+    out = []
+    for entry in loras:
+        if not isinstance(entry, dict) or not entry.get("active", False):
+            continue
+        name = entry.get("name")
+        if isinstance(name, str) and name.strip():
+            out.append((name, entry.get("strength", 1.0)))
+    return out
+
+
+def _lm_stack_loras(prompt: dict, stack_ref, _seen: set | None = None):
+    """Follow a LoraManager ``lora_stack`` link through chained Stacker nodes."""
+    if not isinstance(stack_ref, list):
+        return []
+    if _seen is None:
+        _seen = set()
+    node_id = str(stack_ref[0])
+    if node_id in _seen:
+        return []
+    node = _node(prompt, node_id)
+    if not node or node.get("class_type") != LM_STACKER:
+        return []
+    inputs = node.get("inputs", {})
+    # The stacker puts the incoming stack first, then its own active entries.
+    out = _lm_stack_loras(prompt, inputs.get("lora_stack"), _seen | {node_id})
+    out.extend(_lm_widget_loras(inputs.get("loras")) or [])
+    return out
 
 
 def _node_loras(prompt: dict, class_type: str, inputs: dict):
@@ -450,6 +516,29 @@ def _node_loras(prompt: dict, class_type: str, inputs: dict):
     Handles the common ComfyUI LoRA-loader variants.
     """
     out = []
+
+    # LoraManager loader: applies its incoming lora_stack, then the active
+    # entries of its ``loras`` widget. The ``text`` widget is only an editor
+    # mirror that still lists deactivated LoRAs, so it is read only when the
+    # structured list is missing.
+    if class_type == LM_LOADER:
+        out.extend(_lm_stack_loras(prompt, inputs.get("lora_stack")))
+        widget = _lm_widget_loras(inputs.get("loras"))
+        if widget is None:
+            text = inputs.get("text")
+            widget = _lora_tags_in_text(text) if isinstance(text, str) else []
+        out.extend(widget)
+        return out
+
+    # LoraManager text loader: lora_stack, then the <lora:…> tags of lora_syntax.
+    if class_type == LM_TEXT_LOADER:
+        out.extend(_lm_stack_loras(prompt, inputs.get("lora_stack")))
+        syntax = inputs.get("lora_syntax")
+        if isinstance(syntax, list):
+            syntax = resolve_text(prompt, syntax)
+        if isinstance(syntax, str):
+            out.extend(_lora_tags_in_text(syntax))
+        return out
 
     # rgthree Power Lora Loader: one entry per ``lora_N`` key, each a dict
     # {"on": bool, "lora": name, "strength": weight}.
@@ -462,8 +551,8 @@ def _node_loras(prompt: dict, class_type: str, inputs: dict):
                 out.append((name, val.get("strength", 1.0)))
         return out
 
-    # Core LoraLoader / LoraLoaderModelOnly and LoraManager's single loader.
-    if class_type in ("LoraLoader", "LoraLoaderModelOnly", "Lora Loader (LoraManager)"):
+    # Core LoraLoader / LoraLoaderModelOnly.
+    if class_type in ("LoraLoader", "LoraLoaderModelOnly"):
         name = get_scalar(prompt, inputs, "lora_name")
         if isinstance(name, str) and name.lower() != "none":
             weight = inputs.get("strength_model")
@@ -479,13 +568,6 @@ def _node_loras(prompt: dict, class_type: str, inputs: dict):
             if isinstance(name, str) and name.lower() != "none":
                 out.append((name, inputs.get(f"strength_{i}", 1.0)))
             i += 1
-
-    # LoraManager loader may also carry <lora:...> tags in its ``text`` widget.
-    if class_type == "Lora Loader (LoraManager)":
-        text = inputs.get("text")
-        if isinstance(text, str):
-            for m in _LORA_TAG_RE.finditer(text):
-                out.append((m.group(1), float(m.group(2))))
 
     return out
 
@@ -526,7 +608,7 @@ def collect_loras(prompt: dict, model_ref, _seen: set | None = None):
     result = []
     seen_stems = set()
     for name, weight in loras:
-        stem = Path(name).stem.lower()
+        stem = _lora_stem(name).lower()
         if stem in seen_stems:
             continue
         seen_stems.add(stem)
@@ -731,7 +813,7 @@ def _lora_tags(loras) -> str:
             w = f"{float(weight):g}"
         except (TypeError, ValueError):
             w = "1"
-        tags.append(f"<lora:{Path(name).stem}:{w}>")
+        tags.append(f"<lora:{_lora_stem(name)}:{w}>")
     return " ".join(tags)
 
 

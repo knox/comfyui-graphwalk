@@ -155,20 +155,37 @@ upstream nodes. The resolver carries the *name* of the field being resolved so i
   nodes on the model edge follow their selected branch. `MODEL_PASSTHROUGH` in
   [main.py](main.py) remains only as a reference list of commonly-seen classes.
 
-### LoRAs — the webui "Resources" panel
+### LoRAs
 
 The model chain is also walked to collect every applied LoRA, which is emitted as
-A1111-style `<lora:name:weight>` tags appended to the positive prompt. IIB reads
-LoRAs from these tags, so they populate the image-info **Resources** list (and become
-searchable LoRA tags) — otherwise empty for ComfyUI images, since ComfyUI keeps LoRAs
-in loader nodes rather than in the prompt text. LoRA-loader nodes understood:
+A1111-style `<lora:name:weight>` tags appended to the positive prompt. IIB's backend
+turns these tags into searchable `lora` tags (tag search, filters, LoRA statistics),
+the same way it does for A1111 images; ComfyUI keeps LoRAs in loader nodes rather
+than in the prompt text, so without this they are invisible. LoRA-loader nodes
+understood:
 
-- `Power Lora Loader (rgthree)` (per-slot `lora_N` = `{on, lora, strength}`) ·
-  `LoraLoader` · `LoraLoaderModelOnly` · `Lora Loader Stack (rgthree)` ·
-  `Lora Loader (LoraManager)` (incl. `<lora:…>` tags in its `text` widget)
+- `Power Lora Loader (rgthree)` (per-slot `lora_N` = `{on, lora, strength}`, only
+  slots that are `on`) · `LoraLoader` · `LoraLoaderModelOnly` ·
+  `Lora Loader Stack (rgthree)` (`None` = empty slot)
+- `Lora Loader (LoraManager)`: like the node itself, only entries of its `loras`
+  widget with `active: true` (also in the `{"__value__": [...]}` form), plus LoRAs
+  from a `lora_stack` chain of `Lora Stacker (LoraManager)` nodes. Its `text` widget
+  is only an editor mirror that still lists deactivated LoRAs; it is read only when
+  the `loras` widget is missing.
+- `LoRA Text Loader (LoraManager)`: `<lora:name:w>` / `<lora:name:w:clip_w>` tags of
+  `lora_syntax` (literal or linked), plus its `lora_stack`.
 
-Names are de-duplicated by filename stem. Embeddings are not a resource type in IIB;
-they remain inline in the prompt as `embedding:name` (the A1111 form).
+Only LoRAs on the sampler's model chain count: loaders behind an unselected switch
+branch or off the chain are ignored. Bypassed or muted nodes never reach the API
+prompt, so they need no handling. Names are reduced to the file name without folder
+and weight-file extension and de-duplicated; IIB itself turns `_` and `-` into spaces
+for the tag. Embeddings are not a resource type in IIB; they remain inline in the
+prompt as `embedding:name` (the A1111 form).
+
+**Known IIB limitation:** the image-info **Resources** row stays empty, also for
+A1111 images. The frontend HTML-escapes the gen-info before its `<lora:…>` regex runs
+on the prompt, so the regex never matches (`fullScreenContextMenu.vue`,
+`stable-diffusion-image-metadata.ts`, IIB v1.10.1). Not fixable from a parser plugin.
 
 ### Image size — latent nodes
 
