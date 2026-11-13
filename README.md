@@ -20,7 +20,7 @@ workflow graph embedded in each image at scan time.
 - A reasonably recent **IIB** with the plugin loader (`plugins/` directory). The plugin
   imports a few IIB internals, including one private helper for a non-standard EXIF
   fallback; that helper's absence degrades only that fallback, not the whole plugin.
-  Tested against [IIB v1.8.0](https://github.com/zanllp/infinite-image-browsing/releases/tag/v1.8.0).
+  Tested against [IIB v1.10.1](https://github.com/zanllp/infinite-image-browsing/releases/tag/v1.10.1).
 
 ## Install
 
@@ -181,11 +181,6 @@ prompt, so they need no handling. Names are reduced to the file name without fol
 and weight-file extension and de-duplicated; IIB itself turns `_` and `-` into spaces
 for the tag. Embeddings are not a resource type in IIB; they remain inline in the
 prompt as `embedding:name` (the A1111 form).
-
-**Known IIB limitation:** the image-info **Resources** row stays empty, also for
-A1111 images. The frontend HTML-escapes the gen-info before its `<lora:…>` regex runs
-on the prompt, so the regex never matches (`fullScreenContextMenu.vue`,
-`stable-diffusion-image-metadata.ts`, IIB v1.10.1). Not fixable from a parser plugin.
 
 ### Image size — latent nodes
 
