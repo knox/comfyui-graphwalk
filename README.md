@@ -14,6 +14,13 @@ This plugin replaces it. It modifies no core IIB files (uninstall by deleting th
 folder) and never writes to your image files — all metadata is read live from the
 workflow graph embedded in each image at scan time.
 
+The code is split in two files:
+
+- `graphwalk.py`: the graph walk itself. Standard library only, no IIB, no PIL, so it
+  can be used on its own (see [Using the core without IIB](#using-the-core-without-iib)).
+- `main.py`: the IIB adapter. Reads the `prompt` chunk from the image, calls the core
+  and hands the result to IIB.
+
 ## Requirements
 
 - **Python ≥ 3.10** (uses PEP 604 `X | None` type hints)
@@ -24,7 +31,9 @@ workflow graph embedded in each image at scan time.
 
 ## Install
 
-1. Copy this `comfyui_graphwalk/` folder into IIB's `plugins/` directory.
+1. Copy the whole `comfyui_graphwalk/` folder into IIB's `plugins/` directory. Both
+   `main.py` and `graphwalk.py` are needed; `main.py` alone fails to load and IIB
+   falls back to its built-in parser.
 2. **Restart IIB** (plugins load only at startup). The console prints
    `IIB loaded plugin: ComfyUI Graph-Walk`.
 
@@ -77,6 +86,36 @@ other image types (A1111, Fooocus, …) are untouched. PNG, WEBP and JPEG are su
 Coverage is broad but not exhaustive — workflows using node types not listed below may
 produce incomplete results.
 
+## Using the core without IIB
+
+`graphwalk.py` takes the already parsed ComfyUI `prompt` JSON; reading it from the file
+is up to the caller. Example with Pillow for a PNG:
+
+```python
+import json
+import sys
+
+from PIL import Image
+
+sys.path.insert(0, "/path/to/comfyui_graphwalk")
+import graphwalk
+
+with Image.open("ComfyUI_00001_.png") as img:
+    prompt = json.loads(img.info["prompt"])
+
+info = graphwalk.extract_from_prompt(prompt)  # None if the graph has no sampler
+if info:
+    print(info["positive"], info["model_name"], info["loras"])
+    print(graphwalk.format_a1111(info))
+```
+
+`extract_from_prompt(prompt)` returns a dict with `positive`, `negative`, `seed`,
+`steps`, `cfg`, `sampler_name`, `scheduler`, `model_name`, `width`, `height` and
+`loras` (list of `(name, weight)`); unresolved values are `""`, `None` or `[]`.
+`format_a1111(info)` turns it into an A1111-style `parameters` string, LoRAs appended
+to the positive prompt as `<lora:name:weight>` tags. Import `graphwalk`, not `main`:
+`main.py` needs IIB.
+
 ## Supported nodes
 
 ### Sampler entry points
@@ -113,7 +152,7 @@ Followed recursively from a text input until a string is produced.
 | `RegexReplace` | follows upstream text, then applies the regex substitution |
 | `StringFunction` / `StringFunction\|pysssss` | concatenates `text_a`, `text_b`, `text_c` |
 | `StringConcatenate` | joins `string_a` and `string_b` using the `delimiter` widget (default `" "`) |
-| Nodes in `TEXT_PASSTHROUGH` | output one of their own text inputs unchanged; the map (class → input name) at the top of [main.py](main.py) names which input is read |
+| Nodes in `TEXT_PASSTHROUGH` | output one of their own text inputs unchanged; the map (class → input name) at the top of [graphwalk.py](graphwalk.py) names which input is read |
 | Any `*Switch` node | follows the branch chosen by `select` (falls back to the first connected input) |
 | Display passthrough — `easy showAnything` · `ShowText\|pysssss` · `Display Any (rgthree)` / … | reads the cached `text`/`value`/`string` widget, else follows the passthrough input |
 | Primitive / `ShowText` / `Note` / `TriggerWord Toggle` / … | any node storing a scalar in `value`, `text`, `string`, `populated_text`, or `trigger_words` |
@@ -153,7 +192,7 @@ upstream nodes. The resolver carries the *name* of the field being resolved so i
   `DifferentialDiffusion`, …), CLIP-conditioning patchers (`CLIPNegPip`), IPAdapter
   variants and `Reroute`, plus any future node that merely forwards the model. Switch
   nodes on the model edge follow their selected branch. `MODEL_PASSTHROUGH` in
-  [main.py](main.py) remains only as a reference list of commonly-seen classes.
+  [graphwalk.py](graphwalk.py) remains only as a reference list of commonly-seen classes.
 
 ### LoRAs
 
@@ -200,7 +239,7 @@ the active branch.
 ## Adding a node
 
 Most gaps are fixed by adding a class name to the right set near the top of
-[main.py](main.py) — no new logic needed if the node merely passes a signal through:
+[graphwalk.py](graphwalk.py) — no new logic needed if the node merely passes a signal through:
 
 - pure model passthrough (e.g. another LoRA loader) → already handled (any `model`
   edge is followed generically); no change needed
