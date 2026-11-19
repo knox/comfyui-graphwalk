@@ -538,7 +538,11 @@ def _node_loras(prompt: dict, class_type: str, inputs: dict):
             weight = inputs.get("strength_model")
             if weight is None:
                 weight = inputs.get("strength", 1.0)
-            out.append((name, weight))
+            # Strength 0 on model and clip = loader switched off (the idle
+            # slot in img2prompt's gen graph): not applied, so not listed.
+            clip = inputs.get("strength_clip", 0)
+            if not (weight == 0 and clip == 0):
+                out.append((name, weight))
 
     # rgthree Lora Loader Stack: lora_1..N / strength_1..N, "None" = empty slot.
     if class_type == "Lora Loader Stack (rgthree)":

@@ -204,7 +204,8 @@ than in the prompt text, so without this they are invisible. LoRA-loader nodes
 understood:
 
 - `Power Lora Loader (rgthree)` (per-slot `lora_N` = `{on, lora, strength}`, only
-  slots that are `on`) · `LoraLoader` · `LoraLoaderModelOnly` ·
+  slots that are `on`) · `LoraLoader` · `LoraLoaderModelOnly` (skipped when
+  `strength_model` and `strength_clip` are both 0, i.e. switched off) ·
   `Lora Loader Stack (rgthree)` (`None` = empty slot)
 - `Lora Loader (LoraManager)`: like the node itself, only entries of its `loras`
   widget with `active: true` (also in the `{"__value__": [...]}` form), plus LoRAs
