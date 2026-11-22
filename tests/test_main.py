@@ -359,6 +359,48 @@ class ImageSaver(AdapterCase):
         self.assertEqual(result.params.meta["Hashes"], compact(HASHES_NEW))
 
 
+class ClipSkip(AdapterCase):
+    def graph(self, layer=-2):
+        g = basic_graph()
+        g["5"] = node("CLIPSetLastLayer", clip=ref(1, 1), stop_at_clip_layer=layer)
+        g["2"]["inputs"]["clip"] = ref(5)
+        return g
+
+    def test_clip_skip_is_in_the_line_and_the_meta(self):
+        result = self.parse(self.png(self.graph()))
+        self.assertEqual(result.params.meta["Clip skip"], "2")
+        self.assertTrue(result.raw_info.endswith("Model: apple_model, Clip skip: 2, Source Identifier: ComfyUI"),
+                        result.raw_info)
+
+    def test_clip_skip_one_and_no_layer_leave_it_out(self):
+        for graph in (self.graph(-1), basic_graph()):
+            result = self.parse(self.png(graph))
+            self.assertNotIn("Clip skip", result.params.meta)
+            self.assertNotIn("Clip skip", result.raw_info)
+
+    def test_meta_equals_what_iib_reads_from_the_line(self):
+        result = self.parse(self.png(self.graph()))
+        iib = parse_generation_parameters(result.raw_info)["meta"]
+        self.assertEqual(iib, {k: v for k, v in result.params.meta.items() if not k.startswith("final_")})
+        self.assertEqual(iib["Clip skip"], "2")
+
+    def test_it_is_no_tag_and_no_prompt_tag(self):
+        result = self.parse(self.png(self.graph()))
+        self.assertEqual(adapter.Main.extra_convert_to_tag_meta_keys, [])
+        self.assertEqual(result.params.pos_prompt, [POSITIVE])
+        self.assertEqual(set(result.params.extra), {"lora", "lyco"})
+
+    def test_position_with_image_saver_resources_and_the_chunk_value_is_not_used(self):
+        chunk = PARAMS_NEW.replace("Seed: 123", "Seed: 123, Clip skip: 5")
+        result = self.parse(self.png(self.graph(), "saver.png", parameters=chunk))
+        line = result.raw_info.splitlines()[-1]
+        self.assertIn(", Model hash: 0a1b2c3d4e, Model: apple_model, Clip skip: 2, Hashes: \"", line)
+        self.assertNotIn("Clip skip: 5", line)
+        self.assertEqual(result.params.meta["Clip skip"], "2")
+        plain = self.parse(self.png(basic_graph(), "saver2.png", parameters=chunk))
+        self.assertNotIn("Clip skip", plain.params.meta)
+
+
 class Fallback(AdapterCase):
     def no_sampler_graph(self):
         g = basic_graph()

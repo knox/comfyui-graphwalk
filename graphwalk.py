@@ -1520,9 +1520,10 @@ def a1111_prompt_text(info: dict, lora_separator: str = " ") -> str:
 def a1111_params(info: dict, resources: dict | None = None):
     """The A1111 parameters line as ordered ``(key, value)`` string pairs (the
     keys ``Steps``, ``Sampler``, ``Schedule type`` (only with a sampler), ``CFG scale``,
-    ``Seed``, ``Size``, ``Model``). ``resources`` (see ``image_saver_resources``)
-    adds ``Model hash`` before ``Model`` and ``Hashes``, ``Lora hashes`` and
-    ``Civitai resources`` after it; the values are plain strings, JSON compact."""
+    ``Seed``, ``Size``, ``Model``, ``Clip skip`` (only above 1, as A1111 writes it)).
+    ``resources`` (see ``image_saver_resources``) adds ``Model hash`` before ``Model``
+    and ``Hashes``, ``Lora hashes`` and ``Civitai resources`` after ``Clip skip``; the
+    values are plain strings, JSON compact."""
     parts = []
     if info.get("steps") is not None:
         parts.append(("Steps", f"{info['steps']}"))
@@ -1542,6 +1543,9 @@ def a1111_params(info: dict, resources: dict | None = None):
     model = model_basename(info.get("model_name"))
     if model:
         parts.append(("Model", model))
+    clip_skip = info.get("clip_skip")
+    if isinstance(clip_skip, int) and not isinstance(clip_skip, bool) and clip_skip > 1:
+        parts.append(("Clip skip", f"{clip_skip}"))
     parts.extend((key, res[key]) for key in _QUOTED_KEYS if key in res)
     return parts
 

@@ -8,7 +8,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import graphwalk  # noqa: E402
-from graphs import basic_graph, node, ref  # noqa: E402
+from graphs import (  # noqa: E402
+    HASHES_NEW, NEGATIVE, PARAMS_NEW, POSITIVE, SETTINGS_HEAD, basic_graph, node, ref,
+)
 from test_custom_sampler import advanced_graph, custom_graph  # noqa: E402
 
 
@@ -287,6 +289,62 @@ class Trace(unittest.TestCase):
     def test_trace_does_not_change_the_result(self):
         g = with_clip(basic_graph(), set_layer(-2))
         self.assertEqual(graphwalk.trace_from_prompt(g)[0], graphwalk.extract_from_prompt(g))
+
+
+SETTINGS = "Steps: 20, Sampler: euler, Schedule type: normal, CFG scale: 7.5, Seed: 123, Size: 512x768"
+
+
+class Output(unittest.TestCase):
+    def line(self, graph, resources=None):
+        return graphwalk.format_a1111(graphwalk.extract_from_prompt(graph), resources).splitlines()[-1]
+
+    def test_clip_skip_above_one_is_written_after_the_model(self):
+        self.assertEqual(self.line(with_clip(basic_graph(), set_layer(-2))), f"{SETTINGS}, Model: apple_model, Clip skip: 2")
+        self.assertEqual(self.line(with_clip(basic_graph(), set_layer(-12))), f"{SETTINGS}, Model: apple_model, Clip skip: 12")
+
+    def test_clip_skip_one_and_none_are_not_written(self):
+        for graph in (with_clip(basic_graph(), set_layer(-1)), basic_graph()):
+            self.assertEqual(self.line(graph), f"{SETTINGS}, Model: apple_model")
+        self.assertEqual(graphwalk.extract_from_prompt(with_clip(basic_graph(), set_layer(-1)))["clip_skip"], 1)
+
+    def test_whole_text_with_clip_skip(self):
+        self.assertEqual(
+            graphwalk.format_a1111(graphwalk.extract_from_prompt(with_clip(basic_graph(), set_layer(-2)))),
+            f"{POSITIVE}\nNegative prompt: {NEGATIVE}\n{SETTINGS}, Model: apple_model, Clip skip: 2",
+        )
+
+    def test_only_a_whole_number_above_one_is_written(self):
+        info = graphwalk.extract_from_prompt(basic_graph())
+        for value in (None, 0, 1, -2, True, False, "2", 2.0, [2]):
+            self.assertNotIn("Clip skip", dict(graphwalk.a1111_params(info | {"clip_skip": value})), repr(value))
+        self.assertIn(("Clip skip", "3"), graphwalk.a1111_params(info | {"clip_skip": 3}))
+        info.pop("clip_skip")  # a dict of an older version of the core
+        self.assertNotIn("Clip skip", dict(graphwalk.a1111_params(info)))
+
+    def test_written_without_a_model_too(self):
+        info = {"clip_skip": 2}
+        self.assertEqual(graphwalk.a1111_params(info), [("Clip skip", "2")])
+
+    def test_position_between_model_and_the_image_saver_resources(self):
+        resources = graphwalk.image_saver_resources(PARAMS_NEW)
+        params = graphwalk.a1111_params(graphwalk.extract_from_prompt(with_clip(basic_graph(), set_layer(-2))), resources)
+        self.assertEqual(
+            [key for key, _ in params],
+            ["Steps", "Sampler", "Schedule type", "CFG scale", "Seed", "Size", "Model hash", "Model", "Clip skip",
+             "Hashes", "Lora hashes", "Civitai resources"],
+        )
+        line = self.line(with_clip(basic_graph(), set_layer(-2)), resources)
+        self.assertIn(', Model hash: 0a1b2c3d4e, Model: apple_model, Clip skip: 2, Hashes: "', line)
+
+    def test_the_clip_skip_of_an_image_saver_chunk_is_not_taken(self):
+        chunk = PARAMS_NEW.replace(SETTINGS_HEAD, f"{SETTINGS_HEAD}, Clip skip: 5")
+        self.assertIn("Clip skip: 5", chunk)
+        self.assertEqual(graphwalk.image_saver_resources(chunk), graphwalk.image_saver_resources(PARAMS_NEW))
+        resources = graphwalk.image_saver_resources(chunk)
+        self.assertNotIn("Clip skip", self.line(basic_graph(), resources))
+        self.assertIn(", Clip skip: 2, ", self.line(with_clip(basic_graph(), set_layer(-2)), resources))
+        self.assertNotIn("Clip skip: 5", self.line(with_clip(basic_graph(), set_layer(-2)), resources))
+        self.assertEqual(resources.get("hashes"), HASHES_NEW)
 
 
 if __name__ == "__main__":
