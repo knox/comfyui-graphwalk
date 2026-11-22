@@ -4,7 +4,7 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions are in
 `graphwalk.__version__`.
 
-## [2.0.0] - unreleased
+## [2.0.0] - 2026-11-22
 
 The public interface of `graphwalk.py` (`extract_from_prompt`, `format_a1111` and the
 other names in `__all__`) is unchanged; the output and the internals are not. The
