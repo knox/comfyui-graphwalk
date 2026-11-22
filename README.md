@@ -47,7 +47,7 @@ generates the list of [supported nodes](#supported-nodes) (see [Tests](#tests)).
 2. **Restart IIB** (plugins load only at startup). The console prints
    `IIB loaded plugin: ComfyUI Graph-Walk`.
 
-Every **newly scanned** image is now parsed correctly.
+Every **newly scanned** image is now parsed by the plugin.
 
 ## Refresh already-indexed images (one-time)
 
