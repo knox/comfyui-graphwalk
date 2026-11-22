@@ -1368,7 +1368,11 @@ def _extract(prompt, trace: list | None):
         found = (*fallback, "no output node leads to a sampler")
     nid, node, reason = found
     walker.log(f"sampler #{nid} {node['class_type']} ({reason})")
-    return _extract_fields(walker, _sampler_sources(walker, node))
+    src = _safe(lambda: _sampler_sources(walker, node), None)
+    if src is None:  # the sampler's inputs could not be read: as if there were none
+        walker.log("(the sampler's inputs could not be read)")
+        return None
+    return _extract_fields(walker, src)
 
 
 def extract_from_prompt(prompt: dict) -> dict | None:

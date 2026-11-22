@@ -2,6 +2,7 @@
 
 import sys
 import unittest
+from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -315,3 +316,11 @@ class NewerModelGraph(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BrokenSamplerInputs(unittest.TestCase):
+    def test_unreadable_sampler_inputs_give_none(self):
+        g = {"9": node("SamplerCustomAdvanced", noise=ref(1), guider=ref(2), sampler=ref(3), sigmas=ref(4),
+                       latent_image=ref(5))}
+        with mock.patch.object(graphwalk, "_advanced_sources", side_effect=RuntimeError("broken")):
+            self.assertIsNone(graphwalk.extract_from_prompt(g))
