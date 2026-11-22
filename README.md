@@ -125,10 +125,10 @@ gets:
 
 - **The `parameters` text** in A1111 style: the prompt with `<lora:name:weight>` tags, a
   `Negative prompt:` line and the settings line (`Steps`, `Sampler`, `Schedule type`,
-  `CFG scale`, `Seed`, `Size`, `Model`, and the [Image Saver
-  resources](#image-saver-resources) when present). The scheduler is its own key, as in
-  A1111: `Sampler: euler, Schedule type: simple`. It is written only together with a
-  sampler name.
+  `CFG scale`, `Seed`, `Size`, `Model`, [`Clip skip`](#clip-skip) when above 1, and the
+  [Image Saver resources](#image-saver-resources) when present). The scheduler is its own
+  key, as in A1111: `Sampler: euler, Schedule type: simple`. It is written only together
+  with a sampler name.
 - **The metadata** (`meta`), taken from the extracted fields rather than parsed back
   from that text: the same keys (`Size` split into `Size-1` / `Size-2`, plus
   `Source Identifier`), complete even when only a few parameters could be resolved.
@@ -185,8 +185,8 @@ reason (first pass, nearest to the output, or fallback).
 
 PNGs saved by the Image Saver node (comfyui-image-saver) carry an A1111 `parameters`
 text chunk next to the `prompt` graph. The graph stays the source of everything it holds
-(prompts, sampler, seed, …; the chunk may spell them in Civitai's names). Only the
-resources are taken from the chunk, so Civitai and hash lookups keep working:
+(prompts, sampler, seed, `Clip skip`, …; the chunk may spell them in Civitai's names).
+Only the resources are taken from the chunk, so Civitai and hash lookups keep working:
 
 | `meta` key (string) | `extra` key | Content |
 |---|---|---|
@@ -198,8 +198,8 @@ resources are taken from the chunk, so Civitai and hash lookups keep working:
 Both Image Saver forms are read (older versions write only `Civitai resources`). The
 chunk is parsed here rather than by IIB's regex, which splits unquoted JSON at its
 commas. In the A1111 text the resources sit in the settings line around `Model`
-(`…, Model hash: <hash>, Model: <name>, Hashes: "<json>", Lora hashes: "<list>",
-Civitai resources: "<json>"`); the three with commas are JSON-quoted so that IIB's
+(`…, Model hash: <hash>, Model: <name>, [Clip skip: <n>,] Hashes: "<json>",
+Lora hashes: "<list>", Civitai resources: "<json>"`); the three with commas are JSON-quoted so that IIB's
 parser and the web UI read them whole. They are not turned into tags. A missing or
 malformed chunk changes nothing. Only PNG is read.
 
@@ -234,8 +234,8 @@ bug report needs. `trace_from_prompt(prompt)` returns the same as `(info, lines)
 
 `extract_from_prompt(prompt)` returns a dict with `positive`, `negative`, `seed`,
 `steps`, `cfg`, `sampler_name`, `scheduler`, `model_name` (as in the graph), `width`,
-`height` and `loras` (list of `(name, weight)`). Unresolved values are `""`, `None` or
-`[]`; a field whose walk fails is reported as unresolved without affecting the others.
+`height`, `loras` (list of `(name, weight)`) and `clip_skip` (int ≥ 1). Unresolved values
+are `""`, `None` or `[]`; a field whose walk fails is reported as unresolved without affecting the others.
 It gives `None` when the graph has no sampler or the input is not a prompt dict.
 
 `format_a1111(info)` turns the dict into an A1111-style `parameters` string. Its parts
@@ -381,8 +381,7 @@ resolved along graph edges when wired from upstream nodes. The resolver carries 
   such as `model_name` (upscalers, detectors) do not end it.
 - **Passthrough** (continue upstream): **any** node carrying a `model` edge is followed
   generically, with no whitelist. This covers LoRA loaders, model patchers
-  (`CLIPSetLastLayer`, `ModelSamplingDiscrete`, `FreeU`, `RescaleCFG`,
-  `DifferentialDiffusion`, …), CLIP-conditioning patchers (`CLIPNegPip`), IPAdapter
+  (`ModelSamplingDiscrete`, `FreeU`, `RescaleCFG`, `DifferentialDiffusion`, …), CLIP-conditioning patchers (`CLIPNegPip`), IPAdapter
   variants and `Reroute`, plus any future node that merely forwards the model. Switch
   nodes on the model edge follow their selected branch.
 - **Model merges** (`ModelMergeSimple`, `ModelMergeAdd`, `ModelMergeBlocks`, … with
@@ -418,6 +417,27 @@ prompt, so they need no handling. Names are reduced to the file name without fol
 and weight-file extension and de-duplicated; IIB itself turns `_` and `-` into spaces
 for the tag. Embeddings are not a resource type in IIB; they remain inline in the
 prompt as `embedding:name` (the A1111 form).
+
+### Clip skip
+
+`clip_skip` is read from the CLIP path of the positive prompt: the walk starts at the
+`clip` input of the first text encoder the positive conditioning reaches and goes back
+through `Reroute`, the [switch nodes](#switches), the LoRA loaders (`LoraLoader`,
+`Power Lora Loader (rgthree)`, `Lora Loader Stack (rgthree)`, `Lora Loader (LoraManager)`,
+`LoRA Text Loader (LoraManager)`) and any other node with a `clip` input (marked
+"generic" in the trace). The first `CLIPSetLastLayer` on the way counts, also when
+others follow it upstream; its `stop_at_clip_layer` (a literal or wired from another
+node) is negated, so `-2` gives a clip skip of 2.
+
+- The line has `Clip skip: N` after `Model` only for N > 1, as A1111 omits the default.
+  The metadata has it as `Clip skip`; it is not a tag.
+- The walk gives nothing where it ends at a loader without a `CLIPSetLastLayer`
+  (`CheckpointLoaderSimple`, `CLIPLoader`, `DualCLIPLoader`, …), at an edge that cannot be
+  resolved, or at a layer that is not a negative whole number. The clip skip a node
+  such as Image Saver writes into its own `parameters` text is not used.
+- Only the clip path of the first text encoder is read; a negative prompt or a refiner
+  with another layer does not count. Loaders that encode the prompt themselves (the
+  Easy-Use pipe loaders with a `clip_skip` widget) are not text encoders here.
 
 ### Image size
 
@@ -591,6 +611,9 @@ near the top of [graphwalk.py](graphwalk.py):
 - conditioning passthrough / merge → `COND_PASSTHROUGH` / `COND_COMBINE`; a node with
   `positive` and `negative` inputs needs nothing
 - another CLIP text encoder → `TEXT_ENCODERS` (class → its text inputs, in order)
+- another node that sets the CLIP layer → `CLIP_SOURCES` (class → its widget, the negated
+  clip skip); a node that merely passes CLIP on needs nothing (any `clip` edge is
+  followed), `CLIP_PASSTHROUGH` lists the known ones
 - a switch → `SWITCHES` (a `Switch` entry says how it picks its input)
 - a multi-output node whose widgets are the values → `OUTPUT_WIDGETS` (slot → widget)
 - a node that passes a value through unchanged → `TEXT_PASSTHROUGH` (text input name) or
@@ -631,7 +654,7 @@ behaviour of the whole extraction, `test_rules.py` one rule table and heuristic 
 time, `test_sampler.py` the choice of the sampler (hires fix, refiner, img2img,
 several output nodes, fallback), `test_custom_sampler.py` `SamplerCustom(Advanced)`
 with every guider, noise, sampler and scheduler node, `test_models.py` the encoders
-and empty latents of newer models, `test_trace.py` the trace mode and the command
+and empty latents of newer models, `test_clip_skip.py` the clip skip, `test_trace.py` the trace mode and the command
 line, `test_supported_nodes.py` that the [node lists](#node-lists) match the rule
 tables.
 
