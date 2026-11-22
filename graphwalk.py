@@ -48,6 +48,8 @@ from contextlib import contextmanager
 from pathlib import PurePosixPath
 from typing import NamedTuple
 
+__version__ = "2.0.0"
+
 __all__ = [
     "extract_from_prompt",
     "format_a1111",

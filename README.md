@@ -50,7 +50,9 @@ Every **newly scanned** image is now parsed correctly.
 ## Refresh already-indexed images (one-time)
 
 IIB caches parsed metadata in its SQLite DB (`iib.db`), so already-indexed images keep
-the info they were indexed with until they are parsed again. Back up the DB file first, stop
+the info they were indexed with until they are parsed again. Do this once after
+installing, and again after an update that changes the output; the
+[changelog](CHANGELOG.md) says which. Back up the DB file first, stop
 IIB, then run **one** of the following.
 
 ### Recommended — re-parse in place (IIB ≥ v1.10.0)
@@ -245,7 +247,8 @@ appended as `<lora:name:weight>` tags), `a1111_params(info)` (the settings as or
 resources](#image-saver-resources) from an A1111 text; passed as second argument to
 `format_a1111` and `a1111_params` they are added to the output.
 
-Import `graphwalk`, not `main`: `main.py` needs IIB.
+`graphwalk.__version__` is the version of the core; the [changelog](CHANGELOG.md)
+lists what changed. Import `graphwalk`, not `main`: `main.py` needs IIB.
 
 ## Supported nodes
 
