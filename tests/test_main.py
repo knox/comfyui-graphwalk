@@ -332,7 +332,7 @@ class ImageSaver(AdapterCase):
 
     def test_graph_without_known_sampler_is_still_delegated(self):
         g = basic_graph()
-        g["9"]["class_type"] = "SamplerCustomAdvanced"
+        g["9"] = node("ImageInvert", image=ref(4))  # nothing that samples
         stub = mock.Mock()
         stub.parse.return_value = ImageGenerationInfo("from iib")
         with mock.patch.object(adapter, "_BuiltinComfyUIParser", stub):
@@ -360,15 +360,15 @@ class ImageSaver(AdapterCase):
 
 
 class Fallback(AdapterCase):
-    def unknown_sampler_graph(self):
+    def no_sampler_graph(self):
         g = basic_graph()
-        g["9"]["class_type"] = "SamplerCustomAdvanced"
+        g["9"] = node("ImageInvert", image=ref(4))  # nothing that samples
         return g
 
-    def test_unknown_sampler_is_delegated_to_iibs_parser(self):  # finding 2
+    def test_graph_without_sampler_is_delegated_to_iibs_parser(self):  # finding 2
         stub = mock.Mock()
         stub.parse.return_value = ImageGenerationInfo("from iib")
-        path = self.png(self.unknown_sampler_graph())
+        path = self.png(self.no_sampler_graph())
         with mock.patch.object(adapter, "_BuiltinComfyUIParser", stub):
             result = self.parse(path)
         self.assertEqual(result.raw_info, "from iib")
@@ -390,19 +390,19 @@ class Fallback(AdapterCase):
     def test_failing_fallback_gives_dimensions(self):  # finding 2
         stub = mock.Mock()
         stub.parse.side_effect = RuntimeError("boom")
-        path = self.png(self.unknown_sampler_graph())
+        path = self.png(self.no_sampler_graph())
         with mock.patch.object(adapter, "_BuiltinComfyUIParser", stub):
             result = self.parse(path)
         self.assertEqual(result.params.meta, {"final_width": 8, "final_height": 12})
 
     def test_missing_fallback_gives_dimensions(self):
-        path = self.png(self.unknown_sampler_graph())
+        path = self.png(self.no_sampler_graph())
         with mock.patch.object(adapter, "_BuiltinComfyUIParser", None):
             result = self.parse(path)
         self.assertEqual(result.params.meta, {"final_width": 8, "final_height": 12})
 
     def test_real_builtin_parser_does_not_raise(self):
-        result = self.parse(self.png(self.unknown_sampler_graph()))
+        result = self.parse(self.png(self.no_sampler_graph()))
         self.assertIsInstance(result, ImageGenerationInfo)
 
 
