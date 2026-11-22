@@ -112,8 +112,10 @@ rm ~/sd-webui-infinite-image-browsing/iib.db
 
 ## How it works
 
-Each ComfyUI image embeds its full workflow graph. The plugin walks that graph
-backwards from the sampler node — through LoRA loaders, Reroutes, conditioning merges
+Each ComfyUI image embeds its full workflow graph. The plugin finds the sampler that
+made the saved picture (from the save node back to the first pass, see
+[Which sampler is read](#which-sampler-is-read)) and walks that graph
+backwards from it — through LoRA loaders, Reroutes, conditioning merges
 and other intermediates — until it reaches the source values (checkpoint name, CLIP
 encoders, latent size, seed/steps/CFG scalars). These are assembled into an A1111-style
 `parameters` string, so tags, search and "Send to txt2img" keep working. IIB's
@@ -129,8 +131,8 @@ other image types (A1111, Fooocus, …) are untouched. PNG, WEBP and JPEG are su
 (WEBP/JPEG metadata is read like IIB does: structured EXIF first, then the
 null-byte and UserComment fallbacks).
 
-When the graph has no known sampler (e.g. `SamplerCustomAdvanced`) or the walk fails,
-the image is parsed by IIB's built-in ComfyUI parser instead; if that fails too, only
+When the graph has no sampler graphwalk knows (see [Which sampler is read](#which-sampler-is-read))
+or the walk fails, the image is parsed by IIB's built-in ComfyUI parser instead; if that fails too, only
 the image dimensions are stored. Failures are logged as warnings (file path and error,
 no prompt text) through IIB's logger.
 
@@ -180,6 +182,36 @@ tags. The parts it is made of are available too: `a1111_prompt_text(info)`,
 
 ## Supported nodes
 
+### Which sampler is read
+
+A graph can hold several samplers (hires fix, refiner, detailer). The one read is the one
+that made the saved picture, found like this:
+
+1. **Output nodes.** Save nodes are the start: the known classes (`SaveImage`,
+   `SaveImageAdvanced`, `SaveAnimatedWEBP` / `PNG`, `SaveWEBM`, `SaveVideo`, `Image Saver`,
+   `Image Saver Simple`, `Image Saver (From Pipe)`, `Save Image (LoraManager)`,
+   `SaveImageKJ`, `SaveImageWithAlpha`, `easy imageSave`, `SaveImageNaming`; table
+   `SAVE_CLASSES`), then any other node with a connected `images` input that no other node
+   uses (a video combiner, say). Preview nodes (`PreviewImage` and the like,
+   `PREVIEW_CLASSES`) count only when no save node leads to a sampler: IIB indexes saved images.
+2. **Back to the latent.** From the output node the picture is followed backwards: through
+   image nodes (`image` / `images` / `pixels` / `video`: upscalers, detailers, `CreateVideo`),
+   `VAEDecode` / `VAEDecodeTiled` (`samples`), `VAEEncode` (`pixels`) and latent nodes, until a
+   node has nothing left to follow, normally an empty latent.
+3. **First pass.** Of the samplers on that way the first pass counts, as in A1111's hires
+   fix: the one whose latent comes from an empty-latent node. Without such a start (img2img:
+   the chain begins at a loaded image) the sampler nearest the output counts. The size is
+   that of the empty latent.
+4. **Several output nodes** are tried by node number (`9` before `12`, not by text), the
+   first with a sampler behind it decides.
+5. **Fallback.** If no output node leads to a sampler, the first `KSampler` /
+   `KSamplerAdvanced` in the graph is used, then the other known classes, then the first
+   node (by number) that looks like a sampler. A graph that has a sampler always gives a
+   result.
+
+`--trace` shows the output node tried, the path back, and the sampler chosen with the
+reason (first pass, nearest to the output, or fallback).
+
 ### Sampler entry points
 
 | Node | Pack |
@@ -190,6 +222,13 @@ tags. The parts it is made of are available too: `a1111_prompt_text(info)`,
 | `KSamplerAdvanced (Efficient)` | efficiency-nodes |
 | `Tiled KSampler` | ComfyUI-TiledDiffusion |
 | `BNK_Unsampler` | ComfyUI-BNK |
+| `SamplerCustom` | built-in |
+| `SamplerCustomAdvanced` | built-in |
+
+Any other node counts as a sampler by its inputs: `model`, `positive`, `negative`,
+`latent_image`, `steps` and a `seed` or `noise_seed` (KSampler-like), or the inputs of
+`SamplerCustom` (`sampler`, `sigmas`, `noise_seed`, …) or `SamplerCustomAdvanced` (`noise`,
+`guider`, `sampler`, `sigmas`, `latent_image`).
 
 The seed is read from `noise_seed` where the sampler has that input, else from `seed`.
 
@@ -199,17 +238,56 @@ LoRA widgets), which is not read: with that loader, only the checkpoint name,
 seed, steps, CFG, sampler and scheduler come out. Without a sampler the image goes to
 IIB's built-in parser (see above).
 
+### Custom samplers — guider, noise, sampler, sigmas
+
+`SamplerCustom` and `SamplerCustomAdvanced` take most of their settings from nodes wired
+to them. Each of these edges is followed like any other (`Reroute` and
+[switches](#switches) included) to the node it comes from; a node that is not listed is
+not read, and its fields stay empty.
+
+| Input | Nodes | Read |
+|---|---|---|
+| `guider` | `CFGGuider` · `DualModelGuider` · `PerpNegGuider` · `ScheduledCFGGuidance` | `model`, `positive`, `negative`, `cfg` |
+| | `BasicGuider` | `model`, `conditioning` as the positive prompt; no negative, no CFG |
+| | `DualCFGGuider` | `model`, `cond1` as the positive prompt, `negative`; no CFG (there are two) |
+| | `LTXVDualCFGGuider` | `model`, `positive`, `negative`, `video_cfg` as the CFG |
+| `noise` | `RandomNoise` | `noise_seed` |
+| | `DisableNoise` | no seed (`SamplerCustom` with `add_noise` off likewise) |
+| `sampler` | `KSamplerSelect` | `sampler_name` |
+| | `SamplerEulerAncestral` · `SamplerEulerAncestralCFGPP` · `SamplerDPMPP_2S_Ancestral` · `SamplerLMS` · `SamplerDPMAdaptative` · `SamplerER_SDE` | the sampler the node stands for (`euler_ancestral`, `lms`, …) |
+| | `SamplerDPMPP_3M_SDE` · `SamplerDPMPP_2M_SDE` · `SamplerDPMPP_SDE` | `dpmpp_3m_sde` etc., with `_gpu` unless `noise_device` is `cpu`, as the nodes do |
+| `sigmas` | `BasicScheduler` | `scheduler` (widget), `steps`; its `model` if the guider is not known |
+| | `KarrasScheduler` · `ExponentialScheduler` · `PolyexponentialScheduler` · `LaplaceScheduler` · `BetaSamplingScheduler` · `VPScheduler` · `SDTurboScheduler` · `AlignYourStepsScheduler` · `GITSScheduler` · `OptimalStepsScheduler` · `Flux2Scheduler` · `LTXVScheduler` · `Ideogram4Scheduler` | `steps`; the scheduler is named after the node: `karras`, `exponential`, `beta` as in ComfyUI's own list, else `polyexponential`, `laplace`, `vp`, `sd_turbo`, `align_your_steps`, `gits`, `optimal_steps`, `flux2`, `ltxv`, `ideogram4` |
+| | `FlipSigmas` · `SetFirstSigma` | passed through, steps unchanged |
+| | `SplitSigmas` · `SplitSigmasDenoise` · `ExtendIntermediateSigmas` | passed through; the number of steps is no longer the scheduler's, so `steps` stays empty |
+
+The model, and so the checkpoint name and the LoRAs, comes from the guider's `model`
+(through `ModelSampling*`, `CFGNorm`, LoRA loaders and the like, as for a KSampler); the
+latent and so the size from `latent_image`. `cfg` is `None` for `BasicGuider` (Flux's
+guidance is not a CFG scale and is not extracted, see [Conditioning](#conditioning)).
+
 ### Prompt text — CLIP encoders
 
-Reached by following the `positive` / `negative` conditioning edges.
+Reached by following the `positive` / `negative` conditioning edges (of the sampler, or of
+its guider). Encoders with several text inputs give all of them, in the order below; equal
+texts count once, different ones are joined with a line break.
 
-| Node | Notes |
+| Node | Text inputs |
 |---|---|
-| `CLIPTextEncode` | standard SD 1.x / 2.x |
-| `CLIPTextEncodeSDXL` | reads both `text_g` (global) and `text_l` (local) |
-| `CLIPTextEncodeSDXLRefiner` | |
-| `smZ CLIPTextEncode` | smZNodes |
-| `BNK_CLIPTextEncodeAdvanced` | ComfyUI-BNK |
+| `CLIPTextEncode` | `text`: standard SD 1.x / 2.x |
+| `CLIPTextEncodeSDXL` | `text_g` (global), `text_l` (local) |
+| `CLIPTextEncodeSDXLRefiner` | `text` |
+| `smZ CLIPTextEncode` | smZNodes: `text_g`, `text_l`, `text` |
+| `BNK_CLIPTextEncodeAdvanced` | ComfyUI-BNK: `text_g`, `text_l`, `text` |
+| `CLIPTextEncodeFlux` | `clip_l`, `t5xxl` |
+| `CLIPTextEncodeSD3` | `clip_l`, `clip_g`, `t5xxl` |
+| `CLIPTextEncodeHiDream` | `clip_l`, `clip_g`, `t5xxl`, `llama` |
+| `CLIPTextEncodeHunyuanDiT` | `bert`, `mt5xl` |
+| `CLIPTextEncodeKandinsky5` | `clip_l`, `qwen25_7b` |
+| `CLIPTextEncodeLumina2` | `user_prompt` (the system prompt is a preset) |
+| `CLIPTextEncodePixArtAlpha` | `text` |
+| `TextEncodeQwenImageEdit` · `TextEncodeQwenImageEditPlus` | `prompt` |
+| `TextEncodeHunyuanVideo_ImageToVideo` | `prompt` |
 
 ### Prompt text — text resolution chain
 
@@ -230,8 +308,10 @@ Followed recursively from a text input until a string is produced.
 ### Conditioning
 
 - **Passthrough** (continue upstream): `Reroute` · `ConditioningSetTimestepRange` ·
-  `ConditioningSetArea` · `ConditioningSetAreaPercentage` · `ConditioningSetMask` ·
-  `unCLIPConditioning`. An unknown node with a `conditioning` input is followed the same
+  `ConditioningSetArea` · `ConditioningSetAreaPercentage` · `ConditioningSetAreaStrength` ·
+  `ConditioningSetMask` · `unCLIPConditioning` · `FluxGuidance` · `ReferenceLatent` ·
+  `FluxKontextMultiReferenceLatentMethod`. `FluxGuidance` only sets a `guidance` value on the
+  conditioning; it is not part of the result. An unknown node with a `conditioning` input is followed the same
   way (marked "generic" in the trace); one with several conditioning inputs is not.
 - **Merge** (all inputs joined): `ConditioningCombine` · `ConditioningConcat` ·
   `ConditioningAverage`
@@ -329,8 +409,14 @@ prompt as `embedding:name` (the A1111 form).
 
 ### Image size — latent nodes
 
-Width/height read from `EmptyLatentImage` · `EmptySD3LatentImage` ·
-`EmptyHunyuanLatentVideo` (direct or Primitive-referenced scalars).
+Width/height read from `EmptyLatentImage` · `EmptySD3LatentImage` · `EmptyFlux2LatentImage` ·
+`EmptyHunyuanLatentVideo` · `EmptyHunyuanVideo15Latent` · `EmptyHunyuanImageLatent` ·
+`EmptyQwenImageLayeredLatentImage` · `EmptyLTXVLatentVideo` · `EmptyMochiLatentVideo` ·
+`EmptyCosmosLatentVideo` · `EmptyChromaRadianceLatentImage` · `EmptyHiDreamO1LatentImage` ·
+`EmptyARVideoLatent` · `EmptyMiniMaxH3LatentAV` (direct or Primitive-referenced scalars).
+Any other node whose class name starts with `Empty`, contains `Latent` and that has `width`
+and `height` inputs counts the same way. For the choice of the [first pass](#which-sampler-is-read)
+any `Empty…Latent…` node is a start, with or without a size.
 
 When width/height are wired from a size-picker node without `width`/`height` widgets,
 the size is read from the first `W×H` / `WxH` in one of its literal string widgets (e.g.
@@ -352,14 +438,20 @@ The walker is generic; what a node does is data in the tables near the top of
 - a model loader → `MODEL_LOADERS` (class → file-name widget)
 - conditioning passthrough / merge → `COND_PASSTHROUGH` / `COND_COMBINE`; a node with
   `positive` and `negative` inputs needs nothing
-- another CLIP text encoder → `TEXT_ENCODE_CLASSES`
+- another CLIP text encoder → `TEXT_ENCODERS` (class → its text inputs, in order)
 - a switch → `SWITCHES` (a `Switch` entry says how it picks its input)
 - a multi-output node whose widgets are the values → `OUTPUT_WIDGETS` (slot → widget)
 - a node that passes a value through unchanged → `TEXT_PASSTHROUGH` (text input name) or
   `VALUE_PASSTHROUGH`
 - a display node with a cached widget → `SHOW_PASSTHROUGH`
-- a sampler variant → `SAMPLER_CLASSES`
-- an empty-latent variant → `LATENT_SIZE_CLASSES`
+- a sampler variant → `SAMPLER_CLASSES` (not needed if it has a KSampler's inputs)
+- a guider, noise, sampler or scheduler node of `SamplerCustomAdvanced` → `GUIDERS`,
+  `NOISE_SEEDS`, `SAMPLER_NODES`, `SCHEDULERS` (and `SIGMAS_PASSTHROUGH` for nodes that
+  take sigmas and give sigmas)
+- a node that saves pictures → `SAVE_CLASSES` (class → the input taking the pictures; one
+  with an `images` input that nothing uses is found without it)
+- an empty-latent variant → `LATENT_SIZE_CLASSES` (not needed if it is named `Empty…Latent…`
+  and has `width` and `height`)
 
 Nodes that transform text (concatenate, regex, wildcards, …) need a dedicated branch in
 `Walker._text_of`. PRs welcome.
@@ -382,7 +474,10 @@ docker run --rm -v "$PWD":/app/plugins/comfyui_graphwalk:ro -w /app <iib-image> 
 
 All graphs and prompts in the tests are synthetic: `test_graphwalk.py` the behaviour of the
 whole extraction, `test_rules.py` one test per rule table and per heuristic that used to
-guess, `test_trace.py` the trace mode and the command line. To check that a change leaves the
+guess, `test_sampler.py` the choice of the sampler (hires fix, refiner, img2img, several
+output nodes, fallback), `test_custom_sampler.py` `SamplerCustom(Advanced)` with every
+guider, noise, sampler and scheduler node, `test_models.py` the encoders and empty latents
+of newer models, `test_trace.py` the trace mode and the command line. To check that a change leaves the
 output for your own images unchanged, compare two versions of the core with
 `tools/compare_versions.py` (Pillow required). It prints only counts, file paths and
 the names of differing fields, never prompt text:
