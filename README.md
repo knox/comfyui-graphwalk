@@ -82,6 +82,12 @@ for path in paths:
     conn.commit()
     add_image_data_single(path)
     done += 1
+# The re-parse adds the new automatic tags but does not count the removed ones down:
+# recount the automatic tags and drop those no image has any more (custom tags untouched).
+conn = DataBase.get_conn()
+conn.execute("UPDATE tag SET count = (SELECT COUNT(*) FROM image_tag WHERE image_tag.tag_id = tag.id) WHERE type <> 'custom'")
+conn.execute("DELETE FROM tag WHERE type <> 'custom' AND NOT EXISTS (SELECT 1 FROM image_tag WHERE image_tag.tag_id = tag.id)")
+conn.commit()
 print("re-parsed:", done, "of", len(paths))
 EOF
 ```
@@ -93,8 +99,8 @@ file. The row keeps its id, so **custom tags and likes stay**; manually edited e
 (`exif_edited=1`) are not touched. The script can be interrupted and re-run: rows left
 with an empty date are picked up by IIB's next scan anyway.
 
-Optionally click **"Rebuild image index"** afterwards: it recomputes the tag counts,
-which the in-place re-parse leaves too high for tags that were removed and added again.
+The last step recounts the automatic tags and removes those left without an image (an
+old sampler name, say); custom tags are not touched.
 
 Older IIB versions (before v1.10.0) delete the image row when a file looks changed,
 and with it its custom tags. Do not use this on them.
