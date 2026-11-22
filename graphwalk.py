@@ -20,9 +20,16 @@ Copyright (c) 2026 Mikolas Bingemer
 """
 
 import re
-from pathlib import Path
+from pathlib import PurePosixPath
 
-__all__ = ["extract_from_prompt", "format_a1111"]
+__all__ = [
+    "extract_from_prompt",
+    "format_a1111",
+    "a1111_prompt_text",
+    "a1111_params",
+    "lora_entries",
+    "model_basename",
+]
 
 # ---------------------------------------------------------------------------
 # Known node classes
@@ -71,38 +78,6 @@ CHECKPOINT_CLASSES = {
     "Checkpoint Loader",
 }
 
-# Reference list of nodes that forward the model output on a ``model`` edge.
-# ``resolve_model_name`` no longer gates on this set — it follows any ``model`` edge
-# generically so unknown patchers are traversed too — but the list is kept as
-# documentation of the commonly-seen model-passthrough classes.
-MODEL_PASSTHROUGH = {
-    "LoraLoader",
-    "LoraLoaderModelOnly",
-    "Lora Loader (LoraManager)",
-    "Power Lora Loader (rgthree)",
-    "Lora Loader Stack (rgthree)",
-    "ModelMergeSimple",
-    "ModelMergeAdd",
-    "ModelMergeBlocks",
-    "CLIPSetLastLayer",
-    "ModelSamplingDiscrete",
-    "ModelSamplingContinuousEDM",
-    "Mahiro",
-    "CFGZeroStar",
-    "Epsilon Scaling",
-    "IPAdapterFaceID",
-    "IPAdapterAdvanced",
-    "IPAdapterStyleComposition",
-    "AttentionCouplePPM",
-    "FreeU",
-    "FreeU_V2",
-    "PerturbedAttentionGuidance",
-    "SelfAttentionGuidance",
-    "RescaleCFG",
-    "DifferentialDiffusion",
-    "Reroute",
-}
-
 # Latent image nodes (source of width/height resolution)
 LATENT_SIZE_CLASSES = {
     "EmptyLatentImage",
@@ -141,7 +116,18 @@ TEXT_PASSTHROUGH = {
 
 
 def _node(prompt: dict, node_id):
-    return prompt.get(str(node_id))
+    node = prompt.get(str(node_id))
+    return node if isinstance(node, dict) else None
+
+
+def _inputs(node: dict) -> dict:
+    inputs = node.get("inputs")
+    return inputs if isinstance(inputs, dict) else {}
+
+
+def _is_ref(val) -> bool:
+    """True for a graph-edge reference ``[node_id, output_index]``."""
+    return isinstance(val, list) and len(val) >= 1 and isinstance(val[0], (str, int))
 
 
 def _is_switch(class_type: str) -> bool:
@@ -149,28 +135,61 @@ def _is_switch(class_type: str) -> bool:
     return "Switch" in class_type
 
 
+# comfy-core If/Else switches: inputs ``switch`` (bool), ``on_false``, ``on_true``.
+BOOL_SWITCHES = {"ComfySwitchNode", "ComfySoftSwitchNode"}
+# rgthree: outputs the first non-empty of its ``any_01``, ``any_02``, … inputs.
+ANY_SWITCH = "Any Switch (rgthree)"
+
+
+def _truthy(val) -> bool:
+    if isinstance(val, str):
+        return val.strip().lower() not in ("", "0", "false", "no", "off")
+    return bool(val)
+
+
 def _switch_selected(prompt: dict, class_type: str, inputs: dict):
     """
-    For a Switch node, return the graph-edge reference of the selected input
-    (``input{select}``, 1-based). Falls back to the first connected ``input*``
-    when ``select`` can't be resolved. Returns None for non-switch nodes.
+    For a Switch node, return the graph-edge reference of the selected input.
+    Falls back to the first connected input when the selection can't be resolved.
+    Returns None for non-switch nodes (and when nothing is selected).
+
+    - comfy-core ``ComfySwitchNode`` / ``ComfySoftSwitchNode``: ``on_true`` /
+      ``on_false`` by the ``switch`` boolean. The soft variant uses the connected
+      branch when only one is connected, the hard one outputs nothing.
+    - rgthree ``Any Switch``: the first connected ``any_*`` input.
+    - Everything else with "Switch" in its name (Impact, …): ``input{select}``.
     """
+    if class_type in BOOL_SWITCHES:
+        flag = _truthy(get_scalar(prompt, inputs, "switch"))
+        chosen = inputs.get("on_true" if flag else "on_false")
+        if _is_ref(chosen):
+            return chosen
+        if class_type == "ComfySoftSwitchNode":
+            other = inputs.get("on_false" if flag else "on_true")
+            if _is_ref(other):
+                return other
+        return None
+    if class_type == ANY_SWITCH:
+        for key, val in inputs.items():
+            if key.startswith("any_") and _is_ref(val):
+                return val
+        return None
     if not _is_switch(class_type):
         return None
     select = inputs.get("select", 1)
-    if isinstance(select, list):
+    if _is_ref(select):
         select = get_scalar(prompt, inputs, "select") or 1
     try:
         select = int(select)
     except (TypeError, ValueError):
         select = 1
     val = inputs.get(f"input{select}")
-    if isinstance(val, list):
+    if _is_ref(val):
         return val
     # Fallback: first connected input slot when 'select' points at an empty one.
     for i in range(1, 32):
         val = inputs.get(f"input{i}")
-        if isinstance(val, list):
+        if _is_ref(val):
             return val
     return None
 
@@ -187,7 +206,7 @@ def resolve_text(prompt: dict, ref, _seen: set | None = None) -> str:
         return ref
     if isinstance(ref, (int, float)):
         return str(ref)
-    if not isinstance(ref, list):
+    if not _is_ref(ref):
         return ""
 
     node_id = str(ref[0])
@@ -200,7 +219,7 @@ def resolve_text(prompt: dict, ref, _seen: set | None = None) -> str:
         return ""
 
     class_type = node.get("class_type", "")
-    inputs = node.get("inputs", {})
+    inputs = _inputs(node)
 
     if class_type == "Reroute":
         return resolve_text(prompt, inputs.get("*"), _seen)
@@ -219,65 +238,54 @@ def resolve_text(prompt: dict, ref, _seen: set | None = None) -> str:
                 return val
         for key in ("anything", "source", "input", "value", "text"):
             val = inputs.get(key)
-            if isinstance(val, list):
+            if _is_ref(val):
                 return resolve_text(prompt, val, _seen)
 
     # ImpactWildcardProcessor (ComfyUI-Impact-Pack):
     # 'populated_text' holds the already-resolved wildcard text (when mode='reproduce')
     if class_type == "ImpactWildcardProcessor":
         pt = inputs.get("populated_text", "")
-        if isinstance(pt, list):
+        if _is_ref(pt):
             return resolve_text(prompt, pt, _seen)
         return str(pt) if pt else ""
 
-    # RegexReplace: follow the string input, then apply the regex substitution
+    # RegexReplace: follow the string input, then apply the regex substitution.
+    # The pattern, replacement, count and flags may be wired from other nodes.
     if class_type == "RegexReplace":
         text = resolve_text(prompt, inputs.get("string"), _seen)
         if text:
-            pattern = inputs.get("regex_pattern", "")
-            replace = inputs.get("replace", "")
-            count = int(inputs.get("count") or 0)
+            pattern = resolve_text(prompt, inputs.get("regex_pattern", ""), _seen)
+            replace = resolve_text(prompt, inputs.get("replace", ""), _seen)
+            try:
+                count = int(get_scalar(prompt, inputs, "count") or 0)
+            except (TypeError, ValueError):
+                count = 0
             flags = 0
-            if inputs.get("case_insensitive"):
+            if _truthy(get_scalar(prompt, inputs, "case_insensitive")):
                 flags |= re.IGNORECASE
-            if inputs.get("multiline"):
+            if _truthy(get_scalar(prompt, inputs, "multiline")):
                 flags |= re.MULTILINE
-            if inputs.get("dotall"):
+            if _truthy(get_scalar(prompt, inputs, "dotall")):
                 flags |= re.DOTALL
             try:
                 text = re.sub(pattern, replace, text, count=count, flags=flags)
-            except re.error:
+            except (re.error, ValueError):
                 pass
         return text
 
-    # StringFunction|pysssss and similar string-concatenation nodes
+    # StringFunction|pysssss: same logic as the node's ``exec``.
     if class_type in ("StringFunction|pysssss", "StringFunction"):
-        action = inputs.get("action", "append")
-        parts = []
-        for key in ("text_a", "text_b", "text_c"):
-            val = inputs.get(key)
-            if val is None:
-                continue
-            t = resolve_text(prompt, val, _seen)
-            if t:
-                parts.append(t)
-        sep = ", " if action in ("append",) else ""
-        return sep.join(parts)
+        return _string_function(prompt, inputs, _seen)
 
-    # StringConcatenate (comfy-core): joins string_a and string_b with a delimiter widget
+    # StringConcatenate (comfy-core): ``delimiter.join((string_a, string_b))``;
+    # the delimiter widget defaults to "" and empty parts are kept.
     if class_type == "StringConcatenate":
-        delimiter = inputs.get("delimiter", " ")
-        if isinstance(delimiter, list):
-            delimiter = resolve_text(prompt, delimiter, _seen) or " "
-        parts = []
-        for key in ("string_a", "string_b"):
-            val = inputs.get(key)
-            if val is None:
-                continue
-            t = resolve_text(prompt, val, _seen)
-            if t:
-                parts.append(t)
-        return delimiter.join(parts)
+        delimiter = inputs.get("delimiter", "")
+        if _is_ref(delimiter):
+            delimiter = resolve_text(prompt, delimiter, _seen)
+        part_a = resolve_text(prompt, inputs.get("string_a"), _seen)
+        part_b = resolve_text(prompt, inputs.get("string_b"), _seen)
+        return str(delimiter if delimiter is not None else "").join((part_a, part_b))
 
     # Nodes that output one of their text inputs unchanged (see TEXT_PASSTHROUGH).
     if class_type in TEXT_PASSTHROUGH:
@@ -294,12 +302,34 @@ def resolve_text(prompt: dict, ref, _seen: set | None = None) -> str:
     return ""
 
 
+def _string_function(prompt: dict, inputs: dict, _seen: set) -> str:
+    """``StringFunction|pysssss``: append or replace, then optionally tidy tags."""
+    action = inputs.get("action", "append")
+    tidy = inputs.get("tidy_tags", "yes") == "yes"
+    text_a, text_b, text_c = (resolve_text(prompt, inputs.get(k), _seen) for k in ("text_a", "text_b", "text_c"))
+    if action == "append":
+        out = (", " if tidy else "").join(t for t in (text_a, text_b, text_c) if t)
+    elif text_b.startswith("/") and text_b.endswith("/"):
+        try:
+            out = re.sub(text_b[1:-1], text_c, text_a)
+        except re.error:
+            out = text_a
+    else:
+        out = text_a.replace(text_b, text_c)
+    if tidy:
+        out = re.sub(r"\s{2,}", " ", out)
+        out = out.replace(" ,", ",")
+        out = re.sub(r",{2,}", ",", out)
+        out = out.strip()
+    return out
+
+
 def get_conditioning_text(prompt: dict, cond_ref, _seen: set | None = None) -> str:
     """
     Walk a conditioning edge backwards until the originating text node is reached.
     cond_ref = [node_id, out_idx]
     """
-    if not isinstance(cond_ref, list):
+    if not _is_ref(cond_ref):
         return ""
     if _seen is None:
         _seen = set()
@@ -314,7 +344,11 @@ def get_conditioning_text(prompt: dict, cond_ref, _seen: set | None = None) -> s
         return ""
 
     class_type = node.get("class_type", "")
-    inputs = node.get("inputs", {})
+    inputs = _inputs(node)
+
+    # ConditioningZeroOut blanks the conditioning: no text, whatever feeds it.
+    if class_type == "ConditioningZeroOut":
+        return ""
 
     # Text-encode node reached — extract the text
     if class_type in TEXT_ENCODE_CLASSES:
@@ -338,7 +372,7 @@ def get_conditioning_text(prompt: dict, cond_ref, _seen: set | None = None) -> s
     if class_type in COND_PASSTHROUGH:
         for key in ("*", "conditioning"):
             val = inputs.get(key)
-            if isinstance(val, list):
+            if _is_ref(val):
                 return get_conditioning_text(prompt, val, _seen)
         return ""
 
@@ -347,7 +381,7 @@ def get_conditioning_text(prompt: dict, cond_ref, _seen: set | None = None) -> s
         parts = []
         for key in ("conditioning_1", "conditioning_2", "conditioning_to", "conditioning_from"):
             val = inputs.get(key)
-            if isinstance(val, list):
+            if _is_ref(val):
                 t = get_conditioning_text(prompt, val, _seen)
                 if t:
                     parts.append(t)
@@ -356,18 +390,21 @@ def get_conditioning_text(prompt: dict, cond_ref, _seen: set | None = None) -> s
     # ControlNetApply nodes pass conditioning through slot-matched inputs:
     # output slot 0 = positive conditioning (input key "positive"),
     # output slot 1 = negative conditioning (input key "negative").
-    if class_type in ("ControlNetApplyAdvanced", "ControlNetApply"):
+    # The deprecated single-input ControlNetApply has just ``conditioning``.
+    if class_type in ("ControlNetApplyAdvanced", "ControlNetApplySD3", "ControlNetApply"):
         out_slot = cond_ref[1] if len(cond_ref) > 1 else 0
         follow_key = "negative" if out_slot == 1 else "positive"
         val = inputs.get(follow_key)
-        if isinstance(val, list):
+        if val is None:
+            val = inputs.get("conditioning")
+        if _is_ref(val):
             return get_conditioning_text(prompt, val, _seen)
         return ""
 
     # Unknown node type with a conditioning input — follow it anyway
     for key in ("conditioning", "conditioning_1"):
         val = inputs.get(key)
-        if isinstance(val, list):
+        if _is_ref(val):
             return get_conditioning_text(prompt, val, _seen)
 
     return ""
@@ -378,7 +415,7 @@ def resolve_model_name(prompt: dict, model_ref, _seen: set | None = None) -> str
     Walk the model edge backwards through LoRA loaders and similar passthrough nodes
     until the checkpoint loader is reached; return its ckpt_name.
     """
-    if not isinstance(model_ref, list):
+    if not _is_ref(model_ref):
         return ""
     if _seen is None:
         _seen = set()
@@ -393,16 +430,17 @@ def resolve_model_name(prompt: dict, model_ref, _seen: set | None = None) -> str
         return ""
 
     class_type = node.get("class_type", "")
-    inputs = node.get("inputs", {})
+    inputs = _inputs(node)
 
-    if class_type in CHECKPOINT_CLASSES:
-        return inputs.get("ckpt_name") or inputs.get("unet_name") or ""
+    # The name may be a widget or wired from another node (get_scalar follows it).
     # Some loaders expose the model under a different widget without being a
     # dedicated checkpoint class — honour those names when present.
     for key in ("ckpt_name", "unet_name", "model_name"):
-        val = inputs.get(key)
+        val = get_scalar(prompt, inputs, key)
         if isinstance(val, str) and val:
             return val
+    if class_type in CHECKPOINT_CLASSES:
+        return ""
 
     # Otherwise treat any node carrying a model edge as a passthrough (LoRA
     # loaders, model patchers, CLIP*Pip, IPAdapter, samplers-config, …) and keep
@@ -412,9 +450,12 @@ def resolve_model_name(prompt: dict, model_ref, _seen: set | None = None) -> str
     if sel is not None:
         return resolve_model_name(prompt, sel, _seen)
 
-    sub = inputs.get("*") if class_type == "Reroute" else inputs.get("model")
-    if isinstance(sub, list):
-        return resolve_model_name(prompt, sub, _seen)
+    # Model merges (ModelMergeSimple, ModelMergeBlocks, …) have ``model1`` and
+    # ``model2``: the name is that of the first, the second is only a fallback.
+    for key in ("*", "model", "model1", "model2"):
+        sub = inputs.get(key)
+        if _is_ref(sub):
+            return resolve_model_name(prompt, sub, _seen)
 
     return ""
 
@@ -473,7 +514,7 @@ def _lm_widget_loras(loras):
 
 def _lm_stack_loras(prompt: dict, stack_ref, _seen: set | None = None):
     """Follow a LoraManager ``lora_stack`` link through chained Stacker nodes."""
-    if not isinstance(stack_ref, list):
+    if not _is_ref(stack_ref):
         return []
     if _seen is None:
         _seen = set()
@@ -483,7 +524,7 @@ def _lm_stack_loras(prompt: dict, stack_ref, _seen: set | None = None):
     node = _node(prompt, node_id)
     if not node or node.get("class_type") != LM_STACKER:
         return []
-    inputs = node.get("inputs", {})
+    inputs = _inputs(node)
     # The stacker puts the incoming stack first, then its own active entries.
     out = _lm_stack_loras(prompt, inputs.get("lora_stack"), _seen | {node_id})
     out.extend(_lm_widget_loras(inputs.get("loras")) or [])
@@ -514,7 +555,7 @@ def _node_loras(prompt: dict, class_type: str, inputs: dict):
     if class_type == LM_TEXT_LOADER:
         out.extend(_lm_stack_loras(prompt, inputs.get("lora_stack")))
         syntax = inputs.get("lora_syntax")
-        if isinstance(syntax, list):
+        if _is_ref(syntax):
             syntax = resolve_text(prompt, syntax)
         if isinstance(syntax, str):
             out.extend(_lora_tags_in_text(syntax))
@@ -531,16 +572,20 @@ def _node_loras(prompt: dict, class_type: str, inputs: dict):
                 out.append((name, val.get("strength", 1.0)))
         return out
 
-    # Core LoraLoader / LoraLoaderModelOnly.
+    # Core LoraLoader / LoraLoaderModelOnly (strengths may be wired from other nodes).
     if class_type in ("LoraLoader", "LoraLoaderModelOnly"):
         name = get_scalar(prompt, inputs, "lora_name")
         if isinstance(name, str) and name.lower() != "none":
-            weight = inputs.get("strength_model")
+            weight = get_scalar(prompt, inputs, "strength_model")
             if weight is None:
-                weight = inputs.get("strength", 1.0)
+                weight = get_scalar(prompt, inputs, "strength")
+            if weight is None:
+                weight = 1.0
             # Strength 0 on model and clip = loader switched off (the idle
             # slot in img2prompt's gen graph): not applied, so not listed.
-            clip = inputs.get("strength_clip", 0)
+            clip = get_scalar(prompt, inputs, "strength_clip")
+            if clip is None:
+                clip = 0
             if not (weight == 0 and clip == 0):
                 out.append((name, weight))
 
@@ -548,9 +593,10 @@ def _node_loras(prompt: dict, class_type: str, inputs: dict):
     if class_type == "Lora Loader Stack (rgthree)":
         i = 1
         while f"lora_{i}" in inputs:
-            name = inputs.get(f"lora_{i}")
+            name = get_scalar(prompt, inputs, f"lora_{i}")
             if isinstance(name, str) and name.lower() != "none":
-                out.append((name, inputs.get(f"strength_{i}", 1.0)))
+                weight = get_scalar(prompt, inputs, f"strength_{i}")
+                out.append((name, 1.0 if weight is None else weight))
             i += 1
 
     return out
@@ -562,7 +608,7 @@ def collect_loras(prompt: dict, model_ref, _seen: set | None = None):
     LoRA applied along the chain as (name, weight) pairs, de-duplicated by the
     filename stem (first weight wins).
     """
-    if not isinstance(model_ref, list):
+    if not _is_ref(model_ref):
         return []
     if _seen is None:
         _seen = set()
@@ -577,16 +623,24 @@ def collect_loras(prompt: dict, model_ref, _seen: set | None = None):
         return []
 
     class_type = node.get("class_type", "")
-    inputs = node.get("inputs", {})
+    inputs = _inputs(node)
 
     loras = list(_node_loras(prompt, class_type, inputs))
 
-    if class_type == "Reroute":
-        sub = inputs.get("*")
+    # Follow the selected switch branch, else ``model`` (or ``*`` on a Reroute);
+    # model merges (``model1`` / ``model2``) contribute the LoRAs of both inputs.
+    sel = _switch_selected(prompt, class_type, inputs)
+    if _is_ref(sel):
+        subs = [sel]
+    elif class_type == "Reroute":
+        subs = [inputs.get("*")]
+    elif _is_ref(inputs.get("model")):
+        subs = [inputs.get("model")]
     else:
-        sub = _switch_selected(prompt, class_type, inputs) or inputs.get("model")
-    if isinstance(sub, list):
-        loras.extend(collect_loras(prompt, sub, _seen))
+        subs = [inputs.get("model1"), inputs.get("model2")]
+    for sub in subs:
+        if _is_ref(sub):
+            loras.extend(collect_loras(prompt, sub, _seen))
 
     # De-duplicate by stem, preserving first occurrence.
     result = []
@@ -617,8 +671,8 @@ def get_scalar(prompt: dict, inputs: dict, key: str, _seen: set | None = None):
 def _resolve_scalar(prompt: dict, val, key: str, _seen: set | None = None):
     if val is None:
         return None
-    if not isinstance(val, list):
-        return val
+    if not _is_ref(val):
+        return val if not isinstance(val, list) else None
 
     if _seen is None:
         _seen = set()
@@ -632,7 +686,7 @@ def _resolve_scalar(prompt: dict, val, key: str, _seen: set | None = None):
         return None
 
     class_type = node.get("class_type", "")
-    sub = node.get("inputs", {})
+    sub = _inputs(node)
 
     # Switch — follow the selected branch, keeping the same requested key.
     sel = _switch_selected(prompt, class_type, sub)
@@ -683,7 +737,7 @@ def _resolve_scalar(prompt: dict, val, key: str, _seen: set | None = None):
 
 def resolve_latent_size(prompt: dict, latent_ref, _seen: set | None = None):
     """Return (width, height) if the latent originates from an EmptyLatentImage node, otherwise (None, None)."""
-    if not isinstance(latent_ref, list):
+    if not _is_ref(latent_ref):
         return None, None
     if _seen is None:
         _seen = set()
@@ -698,7 +752,7 @@ def resolve_latent_size(prompt: dict, latent_ref, _seen: set | None = None):
         return None, None
 
     class_type = node.get("class_type", "")
-    inputs = node.get("inputs", {})
+    inputs = _inputs(node)
 
     if class_type in LATENT_SIZE_CLASSES:
         # width/height may be direct values or references to upstream scalar (Primitive) nodes
@@ -719,7 +773,7 @@ def resolve_latent_size(prompt: dict, latent_ref, _seen: set | None = None):
     # resolution — follow the first latent-carrying edge back to its source.
     for key in ("latent", "latent_image", "samples", "LATENT"):
         val = inputs.get(key)
-        if isinstance(val, list):
+        if _is_ref(val):
             return resolve_latent_size(prompt, val, _seen)
 
     return None, None
@@ -730,14 +784,23 @@ def resolve_latent_size(prompt: dict, latent_ref, _seen: set | None = None):
 # ---------------------------------------------------------------------------
 
 
+def _safe(func, default):
+    """Run one field's extraction; a field that fails gets its "unresolved" value."""
+    try:
+        return func()
+    except Exception:  # noqa: BLE001 - one broken node must not cost the other fields
+        return default
+
+
 def extract_from_prompt(prompt: dict) -> dict | None:
     """
     Find the primary sampler node in the ComfyUI graph and extract all relevant
-    generation parameters. Returns None when no sampler node is found.
+    generation parameters. Returns None when no sampler node is found or the
+    input is not a prompt dict.
 
     ``prompt`` is the parsed ComfyUI API prompt (node id -> {"class_type", "inputs"}).
-    The returned dict always has these keys; a value that cannot be resolved is
-    "" (text fields), None (scalars) or [] (loras):
+    The returned dict always has these keys; a value that cannot be resolved (or
+    whose extraction fails) is "" (text fields), None (scalars) or [] (loras):
 
     - ``positive``, ``negative``: prompt text (str)
     - ``seed``, ``steps``, ``cfg``: as stored in the graph (int / float, rarely str)
@@ -746,10 +809,15 @@ def extract_from_prompt(prompt: dict) -> dict | None:
     - ``width``, ``height``: latent size, None if not from an empty-latent node
     - ``loras``: list of (name, weight) tuples on the sampler's model chain
     """
+    if not isinstance(prompt, dict):
+        return None
+
     sampler_nodes = [
         (nid, node)
         for nid, node in prompt.items()
-        if isinstance(node, dict) and node.get("class_type", "") in SAMPLER_CLASSES
+        if isinstance(node, dict)
+        and isinstance(node.get("class_type"), str)
+        and node["class_type"] in SAMPLER_CLASSES
     ]
 
     if not sampler_nodes:
@@ -761,35 +829,24 @@ def extract_from_prompt(prompt: dict) -> dict | None:
         sampler_nodes[0],
     )
     _, node = primary
-    class_type = node.get("class_type", "")
-    inputs = node.get("inputs", {})
+    inputs = _inputs(node)
 
-    positive = get_conditioning_text(prompt, inputs.get("positive"))
-    negative = get_conditioning_text(prompt, inputs.get("negative"))
-
-    seed_key = "noise_seed" if class_type == "KSamplerAdvanced" else "seed"
-    seed = get_scalar(prompt, inputs, seed_key)
-    steps = get_scalar(prompt, inputs, "steps")
-    cfg = get_scalar(prompt, inputs, "cfg")
-    sampler_name = get_scalar(prompt, inputs, "sampler_name")
-    scheduler = get_scalar(prompt, inputs, "scheduler")
-
-    model_name = resolve_model_name(prompt, inputs.get("model"))
-    width, height = resolve_latent_size(prompt, inputs.get("latent_image"))
-    loras = collect_loras(prompt, inputs.get("model"))
+    # KSamplerAdvanced and its variants name the seed ``noise_seed``.
+    seed_key = "noise_seed" if "noise_seed" in inputs else "seed"
+    width, height = _safe(lambda: resolve_latent_size(prompt, inputs.get("latent_image")), (None, None))
 
     return {
-        "positive": positive,
-        "negative": negative,
-        "seed": seed,
-        "steps": steps,
-        "cfg": cfg,
-        "sampler_name": sampler_name,
-        "scheduler": scheduler,
-        "model_name": model_name,
+        "positive": _safe(lambda: get_conditioning_text(prompt, inputs.get("positive")), ""),
+        "negative": _safe(lambda: get_conditioning_text(prompt, inputs.get("negative")), ""),
+        "seed": _safe(lambda: get_scalar(prompt, inputs, seed_key), None),
+        "steps": _safe(lambda: get_scalar(prompt, inputs, "steps"), None),
+        "cfg": _safe(lambda: get_scalar(prompt, inputs, "cfg"), None),
+        "sampler_name": _safe(lambda: get_scalar(prompt, inputs, "sampler_name"), None),
+        "scheduler": _safe(lambda: get_scalar(prompt, inputs, "scheduler"), None),
+        "model_name": _safe(lambda: resolve_model_name(prompt, inputs.get("model")), ""),
         "width": width,
         "height": height,
-        "loras": loras,
+        "loras": _safe(lambda: collect_loras(prompt, inputs.get("model")), []),
     }
 
 
@@ -798,26 +855,42 @@ def extract_from_prompt(prompt: dict) -> dict | None:
 # ---------------------------------------------------------------------------
 
 
-def _lora_tags(loras) -> str:
+def model_basename(model_name) -> str:
+    """Checkpoint name without folder (``/`` or ``\\``) and final extension."""
+    if not isinstance(model_name, str):
+        return ""
+    return PurePosixPath(model_name.replace("\\", "/")).stem
+
+
+def lora_entries(info: dict):
+    """
+    The LoRAs of ``info`` as ``(stem, weight)`` pairs, ``weight`` a float: the
+    name without folder and weight-file extension, the weight formatted with
+    ``%g`` (1 when it is not a number). The single source for the prompt tags
+    and for the IIB adapter's LoRA list.
+    """
+    out = []
+    for name, weight in info.get("loras") or []:
+        try:
+            w = float(f"{float(weight):g}")
+        except (TypeError, ValueError):
+            w = 1.0
+        out.append((_lora_stem(name), w))
+    return out
+
+
+def _lora_tags(info: dict) -> str:
     """Render collected LoRAs as A1111 ``<lora:name:weight>`` tags. IIB (and its
     webui "Resources" panel) reads LoRAs from these prompt tags, so emitting them
     surfaces the graph's LoRAs the same way A1111 metadata would."""
-    tags = []
-    for name, weight in loras or []:
-        try:
-            w = f"{float(weight):g}"
-        except (TypeError, ValueError):
-            w = "1"
-        tags.append(f"<lora:{_lora_stem(name)}:{w}>")
-    return " ".join(tags)
+    return " ".join(f"<lora:{stem}:{w:g}>" for stem, w in lora_entries(info))
 
 
-def format_a1111(info: dict) -> str:
-    """Format extracted generation fields as an A1111-style parameters string."""
+def a1111_prompt_text(info: dict) -> str:
+    """Positive prompt (with LoRA tags) and ``Negative prompt:`` line, no parameters line."""
     lines = []
-
     positive = (info.get("positive") or "").strip()
-    lora_tags = _lora_tags(info.get("loras"))
+    lora_tags = _lora_tags(info)
     if lora_tags:
         positive = f"{positive} {lora_tags}".strip()
     if positive:
@@ -826,25 +899,39 @@ def format_a1111(info: dict) -> str:
     neg = (info.get("negative") or "").strip()
     if neg:
         lines.append(f"Negative prompt: {neg}")
+    return "\n".join(lines)
 
+
+def a1111_params(info: dict):
+    """The A1111 parameters line as ordered ``(key, value)`` string pairs (the
+    keys ``Steps``, ``Sampler``, ``CFG scale``, ``Seed``, ``Size``, ``Model``)."""
     parts = []
     if info.get("steps") is not None:
-        parts.append(f"Steps: {info['steps']}")
+        parts.append(("Steps", f"{info['steps']}"))
     if info.get("sampler_name"):
         samp = info["sampler_name"]
         if info.get("scheduler"):
             samp = f"{samp} {info['scheduler']}"
-        parts.append(f"Sampler: {samp}")
+        parts.append(("Sampler", f"{samp}"))
     if info.get("cfg") is not None:
-        parts.append(f"CFG scale: {info['cfg']}")
+        parts.append(("CFG scale", f"{info['cfg']}"))
     if info.get("seed") is not None:
-        parts.append(f"Seed: {info['seed']}")
+        parts.append(("Seed", f"{info['seed']}"))
     if info.get("width") and info.get("height"):
-        parts.append(f"Size: {info['width']}x{info['height']}")
-    if info.get("model_name"):
-        parts.append(f"Model: {Path(info['model_name']).stem}")
+        parts.append(("Size", f"{info['width']}x{info['height']}"))
+    model = model_basename(info.get("model_name"))
+    if model:
+        parts.append(("Model", model))
+    return parts
 
-    if parts:
-        lines.append(", ".join(parts))
 
+def format_a1111(info: dict) -> str:
+    """Format extracted generation fields as an A1111-style parameters string."""
+    lines = []
+    text = a1111_prompt_text(info)
+    if text:
+        lines.append(text)
+    params = a1111_params(info)
+    if params:
+        lines.append(", ".join(f"{k}: {v}" for k, v in params))
     return "\n".join(lines)
