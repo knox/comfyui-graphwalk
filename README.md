@@ -20,8 +20,9 @@ The code is split in two files:
 
 - `graphwalk.py`: the graph walk itself. Standard library only, no IIB, no PIL, so it
   can be used on its own (see [Using the core without IIB](#using-the-core-without-iib)).
-- `main.py`: the IIB adapter. Reads the `prompt` chunk from the image, calls the core
-  and hands the result to IIB.
+- `main.py`: the IIB adapter. Reads the `prompt` chunk (and, for PNG, resources from
+  an Image Saver `parameters` chunk) from the image, calls the core and hands the
+  result to IIB.
 
 `tests/` holds the unit tests, `tools/compare_versions.py` a regression check
 between two versions of the core (see [Tests](#tests)).
@@ -123,7 +124,7 @@ is its own key, as in A1111 (`Sampler: euler, Schedule type: simple`). IIB's
 `parse_prompt` turns the prompt text into prompt tags (given a comma before the LoRA
 tags, so the last phrase of the prompt stays a tag of its own; IIB versions without
 `parse_prompt` get the same tags through `parse_generation_parameters`); the metadata
-(`Steps`, `Sampler`, `Schedule type`, `CFG scale`, `Seed`, `Size`, `Model`, `Source Identifier`) and the
+(`Steps`, `Sampler`, `Schedule type`, `CFG scale`, `Seed`, `Size`, `Model`, `Source Identifier`, plus [Image Saver resources](#image-saver-resources) when present) and the
 LoRA list come straight from the extracted fields, so they are complete even when only
 a few parameters could be resolved and also cover LoRAs IIB's own `<lora:…>` pattern
 cannot read (negative weights, names with characters such as `+` or `'`).
@@ -142,6 +143,28 @@ Coverage is broad but not exhaustive — workflows using node types not listed b
 produce incomplete results. The rule is *better empty than wrong*: where the graph needs
 a rule the plugin does not know (an unknown switch, a size it cannot read), the value
 stays unresolved instead of being guessed.
+
+### Image Saver resources
+
+PNGs saved by the Image Saver node (comfyui-image-saver) carry an A1111 `parameters`
+text chunk next to the `prompt` graph. The graph stays the source of everything it
+holds (prompts, sampler, seed, …; the chunk may spell them in Civitai's names). Only the resources are taken from the chunk, so Civitai and hash
+lookups keep working:
+
+| `meta` key (string) | `extra` key | Content |
+|---|---|---|
+| `Model hash` | `model_hash` | checkpoint hash |
+| `Hashes` | `hashes` | dict: `model`, `LORA:<name>`, `embed:<name>` → hash |
+| `Lora hashes` | `lora_hashes` | dict: LoRA name → hash |
+| `Civitai resources` | `civitai_resources` | list of the resource objects |
+
+Both Image Saver forms are read (older versions write only `Civitai resources`). The
+chunk is parsed here rather than by IIB's regex, which splits unquoted JSON at its
+commas. In the A1111 text they sit in the settings line around `Model`
+(`…, Model hash: <hash>, Model: <name>, Hashes: "<json>", Lora hashes: "<list>",
+Civitai resources: "<json>"`); the three with commas are JSON-quoted so that IIB's
+parser and the web UI read them whole. They are not turned into tags. A missing or
+malformed chunk changes nothing. Only PNG is read.
 
 ## Using the core without IIB
 
@@ -180,7 +203,9 @@ not a prompt dict gives `None`. `format_a1111(info)` turns it into an A1111-styl
 `parameters` string, LoRAs appended to the positive prompt as `<lora:name:weight>`
 tags. The parts it is made of are available too: `a1111_prompt_text(info)`,
 `a1111_params(info)` (ordered `(key, value)` strings, the scheduler as `Schedule type`),
-`lora_entries(info)` and `model_basename(name)`. Import `graphwalk`, not `main`: `main.py` needs IIB.
+`lora_entries(info)` and `model_basename(name)`. `image_saver_resources(parameters_text)`
+reads the [Image Saver resources](#image-saver-resources) from an A1111 text; passed as
+second argument to `format_a1111` and `a1111_params` they are added to the output. Import `graphwalk`, not `main`: `main.py` needs IIB.
 
 ## Supported nodes
 

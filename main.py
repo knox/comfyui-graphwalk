@@ -156,6 +156,21 @@ def _get_prompt_dict(img):
         return None
 
 
+def _get_resources(img) -> dict:
+    """
+    Resources (model hash, hashes, Civitai resources) from the A1111 ``parameters``
+    chunk some ComfyUI PNGs carry next to the ``prompt`` graph (Image Saver), or {}.
+    Nothing but resources is taken from it, and a missing or broken chunk never
+    fails the parse.
+    """
+    try:
+        if img.format != "PNG":
+            return {}
+        return _core.image_saver_resources(img.info.get("parameters"))
+    except Exception:  # noqa: BLE001 - resources are optional
+        return {}
+
+
 # ---------------------------------------------------------------------------
 # What IIB gets: meta, LoRA list, prompt tags
 # ---------------------------------------------------------------------------
@@ -168,7 +183,7 @@ _RE_PARENS = re.compile(r"[\\/\[\](){}]+")
 _PARAMS_SENTINEL = "Steps: 0, Sampler: none, Seed: 0"
 
 
-def _meta_from_info(info: dict) -> dict:
+def _meta_from_info(info: dict, resources: dict | None = None) -> dict:
     """
     IIB's ``meta`` dict, built from the extracted fields. Same keys and string
     values as ``parse_generation_parameters`` yields from the parameters line
@@ -176,7 +191,7 @@ def _meta_from_info(info: dict) -> dict:
     how many parameters could be resolved.
     """
     meta = {}
-    for key, value in _core.a1111_params(info):
+    for key, value in _core.a1111_params(info, resources):
         size = _RE_IMAGESIZE.match(value)
         if size:
             meta[f"{key}-1"], meta[f"{key}-2"] = size.group(1), size.group(2)
@@ -254,7 +269,7 @@ class Main:
             if not info:
                 logger.info("ComfyUI Graph-Walk: no known sampler in %s, using IIB's ComfyUI parser", file_path)
                 return self._fallback(img, file_path, width, height)
-            return self._from_info(info, width, height)
+            return self._from_info(info, width, height, _get_resources(img))
         except Exception as e:
             logger.warning(
                 "ComfyUI Graph-Walk: parsing %s failed (%s: %.200s), using IIB's ComfyUI parser",
@@ -262,8 +277,8 @@ class Main:
             )
             return self._fallback(img, file_path, width, height)
 
-    def _from_info(self, info, width, height) -> ImageGenerationInfo:
-        a1111 = format_a1111(info)
+    def _from_info(self, info, width, height, resources=None) -> ImageGenerationInfo:
+        a1111 = format_a1111(info, resources)
         # "Source Identifier" must appear on the metadata line to match ComfyUIParser behaviour.
         a1111 = (a1111 + ", Source Identifier: ComfyUI") if a1111 else "Source Identifier: ComfyUI"
 
@@ -271,9 +286,12 @@ class Main:
         # needs to recognise it, so prompt tags come from IIB's ``parse_prompt`` on
         # the prompt text and meta and LoRAs from the extracted fields.
         params = _prompt_tags(info)
-        meta = _meta_from_info(info)
+        meta = _meta_from_info(info, resources)
         params = {"meta": meta, **params}
         params["lora"] = _merge_loras(info, params["lora"])
+        # Structured resources for consumers of ``extra``; not tags (IIB tags only
+        # the meta keys it lists), and the meta strings carry them too.
+        params.update(resources or {})
         return ImageGenerationInfo(
             a1111,
             ImageGenerationParams(

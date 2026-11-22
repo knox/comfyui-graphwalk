@@ -56,6 +56,7 @@ __all__ = [
     "lora_entries",
     "model_basename",
     "trace_from_prompt",
+    "image_saver_resources",
 ]
 
 # ---------------------------------------------------------------------------
@@ -1452,10 +1453,12 @@ def a1111_prompt_text(info: dict, lora_separator: str = " ") -> str:
     return "\n".join(lines)
 
 
-def a1111_params(info: dict):
+def a1111_params(info: dict, resources: dict | None = None):
     """The A1111 parameters line as ordered ``(key, value)`` string pairs (the
     keys ``Steps``, ``Sampler``, ``Schedule type`` (only with a sampler), ``CFG scale``,
-    ``Seed``, ``Size``, ``Model``)."""
+    ``Seed``, ``Size``, ``Model``). ``resources`` (see ``image_saver_resources``)
+    adds ``Model hash`` before ``Model`` and ``Hashes``, ``Lora hashes`` and
+    ``Civitai resources`` after it; the values are plain strings, JSON compact."""
     parts = []
     if info.get("steps") is not None:
         parts.append(("Steps", f"{info['steps']}"))
@@ -1469,22 +1472,175 @@ def a1111_params(info: dict):
         parts.append(("Seed", f"{info['seed']}"))
     if info.get("width") and info.get("height"):
         parts.append(("Size", f"{info['width']}x{info['height']}"))
+    res = _resource_values(resources)
+    if "Model hash" in res:
+        parts.append(("Model hash", res["Model hash"]))
     model = model_basename(info.get("model_name"))
     if model:
         parts.append(("Model", model))
+    parts.extend((key, res[key]) for key in _QUOTED_KEYS if key in res)
     return parts
 
 
-def format_a1111(info: dict) -> str:
-    """Format extracted generation fields as an A1111-style parameters string."""
+def format_a1111(info: dict, resources: dict | None = None) -> str:
+    """Format extracted generation fields as an A1111-style parameters string.
+    The values of ``Hashes``, ``Lora hashes`` and ``Civitai resources`` are written
+    as JSON strings, so that readers splitting the line at commas keep them whole."""
     lines = []
     text = a1111_prompt_text(info)
     if text:
         lines.append(text)
-    params = a1111_params(info)
+    params = a1111_params(info, resources)
     if params:
-        lines.append(", ".join(f"{k}: {v}" for k, v in params))
+        lines.append(", ".join(
+            f"{k}: {json.dumps(v, ensure_ascii=False) if k in _QUOTED_KEYS else v}" for k, v in params
+        ))
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Resources from an A1111 ``parameters`` chunk (Image Saver)
+# ---------------------------------------------------------------------------
+#
+# Some ComfyUI images (node "Image Saver", comfyui-image-saver) carry a
+# ``parameters`` text chunk next to the ``prompt`` graph. The graph stays the source
+# of the generation fields; only the resources are taken from the text: model
+# hash, hashes of model / LoRAs / embeddings and the Civitai resource list.
+
+_QUOTED_KEYS = ("Hashes", "Lora hashes", "Civitai resources")
+_RESOURCE_KEYS = {
+    "model hash": "model_hash",
+    "hashes": "hashes",
+    "lora hashes": "lora_hashes",
+    "civitai resources": "civitai_resources",
+}
+_RE_SETTING_KEY = re.compile(r"\s*([\w ]+):[ \t]*")
+_RE_NEXT_SETTING = re.compile(r",\s*[\w ]+:(?:\s|$)")
+_RE_VALUE_END = re.compile(r"\s*(?:,|$)")
+_RE_NAME_HASH = re.compile(r"\s*([^,]+?):\s*([0-9A-Za-z]+)\s*(?:,|$)")
+_JSON = json.JSONDecoder()
+
+
+def _compact(value) -> str:
+    return json.dumps(value, separators=(",", ":"), ensure_ascii=False)
+
+
+def _settings_line(text: str):
+    """The last line that starts with ``Steps: ``, else None."""
+    for line in reversed(text.splitlines()):
+        if line.startswith("Steps: "):
+            return line
+    return None
+
+
+def _parse_settings(line: str) -> dict:
+    """
+    The ``Key: value`` pairs of an A1111 settings line, keys lower-case, the first
+    of a repeated key wins. A value starting with ``{``, ``[`` or ``"`` is read as
+    JSON (so commas inside it do not split it), if it is valid and followed by a
+    comma or the end of the line; any other value ends at the next ``, Key: ``.
+    JSON values come back decoded, the rest as stripped strings.
+    """
+    out = {}
+    pos, end = 0, len(line)
+    while pos < end:
+        key = _RE_SETTING_KEY.match(line, pos)
+        if not key:
+            comma = line.find(",", pos)
+            if comma < 0:
+                break
+            pos = comma + 1
+            continue
+        pos = key.end()
+        value, after = None, None
+        if pos < end and line[pos] in '{["':
+            try:
+                value, after = _JSON.raw_decode(line, pos)
+            except ValueError:
+                after = None
+            tail = _RE_VALUE_END.match(line, after) if after is not None else None
+            if tail:
+                pos = tail.end()
+            else:
+                after = None
+        if after is None:
+            nxt = _RE_NEXT_SETTING.search(line, pos)
+            stop = nxt.start() if nxt else end
+            value = line[pos:stop].strip()
+            pos = stop + 1
+        out.setdefault(key.group(1).strip().lower(), value)
+    return out
+
+
+def _json_value(value):
+    """``value`` itself, or what it decodes to when it is a string holding JSON."""
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except ValueError:
+            return None
+    return value
+
+
+def image_saver_resources(parameters) -> dict:
+    """
+    Resources from the A1111 ``parameters`` text of an image, as a dict that has
+    only the entries found (``{}`` for no text, no settings line or nothing usable;
+    never raises on malformed text):
+
+    - ``model_hash``: str
+    - ``hashes``: dict, name -> hash (``Hashes``: ``model``, ``LORA:<name>``, ``embed:<name>``)
+    - ``lora_hashes``: dict, name -> hash (``Lora hashes: "name: hash, …"``)
+    - ``civitai_resources``: list of dicts (``Civitai resources``), any element form
+
+    Both forms of Image Saver are read: the older one has only ``Civitai resources``
+    (JSON array, not quoted), the newer one all four, ``Hashes`` as compact JSON and
+    ``Lora hashes`` quoted. Prompt, sampler, seed and the other settings are ignored.
+    """
+    if not isinstance(parameters, str):
+        return {}
+    try:
+        line = _settings_line(parameters)
+        settings = _parse_settings(line) if line else {}
+        found = {name: settings[key] for key, name in _RESOURCE_KEYS.items() if key in settings}
+        out = {}
+        model_hash = found.get("model_hash")
+        if isinstance(model_hash, str) and model_hash:
+            out["model_hash"] = model_hash
+        hashes = _json_value(found["hashes"]) if "hashes" in found else None
+        if isinstance(hashes, dict):
+            hashes = {str(k): str(v) for k, v in hashes.items() if isinstance(v, (str, int)) and str(v)}
+            if hashes:
+                out["hashes"] = hashes
+        lora_hashes = found.get("lora_hashes")
+        if isinstance(lora_hashes, str):
+            pairs = {name.strip(): value for name, value in _RE_NAME_HASH.findall(lora_hashes)}
+            if pairs:
+                out["lora_hashes"] = pairs
+        resources = _json_value(found["civitai_resources"]) if "civitai_resources" in found else None
+        if isinstance(resources, list):
+            resources = [item for item in resources if isinstance(item, dict) and item]
+            if resources:
+                out["civitai_resources"] = resources
+        return out
+    except Exception:  # noqa: BLE001 - a broken chunk must never fail the caller
+        return {}
+
+
+def _resource_values(resources) -> dict:
+    """``image_saver_resources`` output as ``{A1111 key: string}``, plain (unquoted)."""
+    if not isinstance(resources, dict):
+        return {}
+    out = {}
+    if resources.get("model_hash"):
+        out["Model hash"] = str(resources["model_hash"])
+    if resources.get("hashes"):
+        out["Hashes"] = _compact(resources["hashes"])
+    if resources.get("lora_hashes"):
+        out["Lora hashes"] = ", ".join(f"{name}: {value}" for name, value in resources["lora_hashes"].items())
+    if resources.get("civitai_resources"):
+        out["Civitai resources"] = _compact(resources["civitai_resources"])
+    return out
 
 
 # ---------------------------------------------------------------------------

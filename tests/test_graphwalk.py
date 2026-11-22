@@ -1,5 +1,6 @@
 """Tests for the IIB-free core graphwalk.py. Run: python3 -m unittest discover tests"""
 
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -8,7 +9,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import graphwalk  # noqa: E402
-from graphs import NEGATIVE, POSITIVE, basic_graph, node, ref  # noqa: E402
+from graphs import (  # noqa: E402
+    CIVITAI_NEW, CIVITAI_OLD, HASHES_NEW, NEGATIVE, PARAMS_NEW, PARAMS_OLD, POSITIVE, SETTINGS_HEAD,
+    basic_graph, node, ref,
+)
 
 
 def extract(graph):
@@ -333,6 +337,111 @@ class FormatParts(unittest.TestCase):
     def test_no_params_no_line(self):
         self.assertEqual(graphwalk.format_a1111({"positive": "a red apple"}), "a red apple")
         self.assertEqual(graphwalk.format_a1111({}), "")
+
+
+class ImageSaverResources(unittest.TestCase):
+    parse = staticmethod(graphwalk.image_saver_resources)
+
+    def test_current_form_all_four(self):
+        self.assertEqual(self.parse(PARAMS_NEW), {
+            "model_hash": "0a1b2c3d4e",
+            "hashes": HASHES_NEW,
+            "lora_hashes": {"pastel_v1": "1122334455", "other_one": "66778899aa"},
+            "civitai_resources": CIVITAI_NEW,
+        })
+
+    def test_older_form_has_only_civitai_resources(self):
+        self.assertEqual(self.parse(PARAMS_OLD), {"civitai_resources": CIVITAI_OLD})
+
+    def test_only_resources_are_taken(self):
+        self.assertEqual(set(self.parse(PARAMS_NEW)), {"model_hash", "hashes", "lora_hashes", "civitai_resources"})
+
+    def test_commas_and_colons_inside_json_do_not_split(self):
+        out = self.parse(f"x\n{SETTINGS_HEAD}, Civitai resources: {json.dumps(CIVITAI_NEW)}, Version: ComfyUI")
+        self.assertEqual(out["civitai_resources"], CIVITAI_NEW)
+
+    def test_resources_in_the_middle_of_the_line(self):
+        out = self.parse(f'x\n{SETTINGS_HEAD}, Civitai resources: [{{"modelName":"a, b: c"}}], Model hash: 0a1b2c3d4e')
+        self.assertEqual(out, {"civitai_resources": [{"modelName": "a, b: c"}], "model_hash": "0a1b2c3d4e"})
+
+    def test_quoted_json_values(self):
+        line = f'{SETTINGS_HEAD}, Hashes: "{{\\"model\\":\\"0a1b2c3d4e\\"}}", Civitai resources: ' + json.dumps('[{"modelName":"a"}]')
+        self.assertEqual(self.parse(line), {"hashes": {"model": "0a1b2c3d4e"}, "civitai_resources": [{"modelName": "a"}]})
+
+    def test_lora_hashes_with_colons_in_the_name(self):
+        out = self.parse(f'{SETTINGS_HEAD}, Lora hashes: "ns:style_a: 0011223344, b: 5566778899"')
+        self.assertEqual(out["lora_hashes"], {"ns:style_a": "0011223344", "b": "5566778899"})
+
+    def test_keys_in_any_case_first_one_wins(self):
+        out = self.parse(f"{SETTINGS_HEAD}, model hash: aaaaaaaaaa, Model hash: bbbbbbbbbb")
+        self.assertEqual(out, {"model_hash": "aaaaaaaaaa"})
+
+    def test_missing_or_unusable_text_gives_nothing(self):
+        for text in (None, 5, b"x", "", "just a prompt", "a, b\nNegative prompt: c",
+                     f"x\n{SETTINGS_HEAD}, Model: apple_model"):
+            self.assertEqual(self.parse(text), {}, text)
+
+    def test_broken_values_are_dropped_and_the_rest_stays(self):
+        for broken in ('[{"modelName":"a"', '{"model":', '"unterminated', "[1, 2", "[]", "{}", '[1,"a"]', "123",
+                       "{\"a\":{\"b\":1}}", "[" * 5000):
+            out = self.parse(f"x\n{SETTINGS_HEAD}, Model hash: 0a1b2c3d4e, Hashes: {broken}, Civitai resources: {broken}")
+            self.assertEqual(out, {"model_hash": "0a1b2c3d4e"}, broken)
+
+    def test_json_followed_by_junk_is_not_taken(self):
+        out = self.parse(f'{SETTINGS_HEAD}, Hashes: {{"model":"x"}} junk, Model hash: 0a1b2c3d4e')
+        self.assertEqual(out, {"model_hash": "0a1b2c3d4e"})
+
+    def test_settings_line_is_the_last_steps_line(self):
+        out = self.parse(f"Steps: 1, Model hash: aaaaaaaaaa\nmore prompt\n{SETTINGS_HEAD}, Model hash: bbbbbbbbbb")
+        self.assertEqual(out, {"model_hash": "bbbbbbbbbb"})
+
+    def test_prompt_text_is_never_read_as_settings(self):
+        self.assertEqual(self.parse("Model hash: aaaaaaaaaa, Hashes: {}\nNegative prompt: x"), {})
+
+
+class ImageSaverFormat(unittest.TestCase):
+    RES = {
+        "model_hash": "0a1b2c3d4e",
+        "hashes": {"model": "0a1b2c3d4e", "LORA:a": "1122334455"},
+        "lora_hashes": {"a": "1122334455"},
+        "civitai_resources": [{"modelName": "A, \"B\"", "modelVersionId": 7}],
+    }
+
+    def info(self):
+        return extract(basic_graph())
+
+    def test_params_order_and_plain_values(self):
+        keys = [k for k, _ in graphwalk.a1111_params(self.info(), self.RES)]
+        self.assertEqual(keys, ["Steps", "Sampler", "Schedule type", "CFG scale", "Seed", "Size", "Model hash", "Model",
+                                "Hashes", "Lora hashes", "Civitai resources"])
+        values = dict(graphwalk.a1111_params(self.info(), self.RES))
+        self.assertEqual(values["Hashes"], '{"model":"0a1b2c3d4e","LORA:a":"1122334455"}')
+        self.assertEqual(values["Lora hashes"], "a: 1122334455")
+        self.assertEqual(values["Civitai resources"], '[{"modelName":"A, \\"B\\"","modelVersionId":7}]')
+
+    def test_line_quotes_everything_but_the_model_hash(self):
+        line = graphwalk.format_a1111(self.info(), self.RES).splitlines()[-1]
+        self.assertEqual(
+            line,
+            "Steps: 20, Sampler: euler, Schedule type: normal, CFG scale: 7.5, Seed: 123, Size: 512x768, "
+            'Model hash: 0a1b2c3d4e, Model: apple_model, '
+            'Hashes: "{\\"model\\":\\"0a1b2c3d4e\\",\\"LORA:a\\":\\"1122334455\\"}", '
+            'Lora hashes: "a: 1122334455", '
+            'Civitai resources: "[{\\"modelName\\":\\"A, \\\\\\"B\\\\\\"\\",\\"modelVersionId\\":7}]"',
+        )
+
+    def test_without_resources_nothing_changes(self):
+        for res in (None, {}, "x"):
+            self.assertEqual(graphwalk.format_a1111(self.info(), res), graphwalk.format_a1111(self.info()))
+            self.assertEqual(graphwalk.a1111_params(self.info(), res), graphwalk.a1111_params(self.info()))
+
+    def test_resources_alone_make_a_line(self):
+        self.assertEqual(graphwalk.format_a1111({}, {"model_hash": "0a1b2c3d4e"}), "Model hash: 0a1b2c3d4e")
+
+    def test_what_is_written_can_be_read_back(self):
+        line = graphwalk.format_a1111(self.info(), self.RES).splitlines()[-1]
+        # the line is the settings line of its own text: read it back through the quoting
+        self.assertEqual(graphwalk.image_saver_resources("x\n" + line), self.RES)
 
 
 if __name__ == "__main__":

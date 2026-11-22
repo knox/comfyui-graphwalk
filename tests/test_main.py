@@ -25,7 +25,10 @@ try:
 except Exception as exc:  # noqa: BLE001 - IIB not importable here
     raise unittest.SkipTest(f"IIB not importable: {exc}")
 
-from graphs import NEGATIVE, POSITIVE, basic_graph, node, ref  # noqa: E402
+from graphs import (  # noqa: E402
+    CIVITAI_NEW, CIVITAI_OLD, HASHES_NEW, LORA_HASHES_NEW, NEGATIVE, PARAMS_NEW, PARAMS_OLD, POSITIVE,
+    basic_graph, node, ref,
+)
 
 _spec = importlib.util.spec_from_file_location("graphwalk_adapter_under_test", HERE.parent / "main.py")
 adapter = importlib.util.module_from_spec(_spec)
@@ -46,10 +49,12 @@ class AdapterCase(unittest.TestCase):
         self.dir = Path(self._tmp.name)
         self.plugin = adapter.Main()
 
-    def png(self, graph, name="a.png"):
+    def png(self, graph, name="a.png", parameters=None):
         info = PngInfo()
         info.add_text("prompt", json.dumps(graph))
         info.add_text("workflow", "{}")
+        if parameters is not None:
+            info.add_text("parameters", parameters)
         path = self.dir / name
         Image.new("RGB", (8, 12), "white").save(path, pnginfo=info)
         return path
@@ -248,6 +253,110 @@ class Loras(AdapterCase):
         for stem in ("simple", "with_underscore-and-dash", "Mixed Case v1.5", "paren (v2)", "dir_style"):
             iib = parse_generation_parameters(f"a <lora:{stem}:0.7>\nSteps: 1, Sampler: x, Seed: 1")["lora"]
             self.assertEqual(iib, [{"name": adapter._iib_lora_name(stem), "value": 0.7}], stem)
+
+
+RESOURCE_META_KEYS = ("Model hash", "Hashes", "Lora hashes", "Civitai resources")
+
+
+def compact(value):
+    return json.dumps(value, separators=(",", ":"), ensure_ascii=False)
+
+
+class ImageSaver(AdapterCase):
+    def baseline(self, graph=None):
+        return self.parse(self.png(graph or basic_graph(), "base.png"))
+
+    def with_chunk(self, text, graph=None):
+        return self.parse(self.png(graph or basic_graph(), "saver.png", parameters=text))
+
+    def test_current_form_adds_resources_to_meta_line_and_extra(self):
+        result = self.with_chunk(PARAMS_NEW)
+        meta = result.params.meta
+        self.assertEqual(meta["Model hash"], "0a1b2c3d4e")
+        self.assertEqual(meta["Hashes"], compact(HASHES_NEW))
+        self.assertEqual(meta["Lora hashes"], LORA_HASHES_NEW)
+        self.assertEqual(meta["Civitai resources"], compact(CIVITAI_NEW))
+        extra = result.params.extra
+        self.assertEqual(extra["model_hash"], "0a1b2c3d4e")
+        self.assertEqual(extra["hashes"], HASHES_NEW)
+        self.assertEqual(extra["lora_hashes"], {"pastel_v1": "1122334455", "other_one": "66778899aa"})
+        self.assertEqual(extra["civitai_resources"], CIVITAI_NEW)
+        line = result.raw_info.splitlines()[-1]
+        self.assertTrue(line.startswith("Steps: 20, Sampler: euler, Schedule type: normal, CFG scale: 7.5, Seed: 123, "
+                                        "Size: 512x768, Model hash: 0a1b2c3d4e, Model: apple_model, Hashes: \""), line)
+        self.assertTrue(line.endswith(", Source Identifier: ComfyUI"), line)
+
+    def test_older_form_adds_civitai_resources_only(self):
+        result = self.with_chunk(PARAMS_OLD)
+        self.assertEqual(result.params.meta["Civitai resources"], compact(CIVITAI_OLD))
+        for key in ("Model hash", "Hashes", "Lora hashes"):
+            self.assertNotIn(key, result.params.meta)
+        self.assertEqual(set(result.params.extra) - {"lora", "lyco"}, {"civitai_resources"})
+
+    def test_only_resources_come_from_the_chunk(self):
+        base, saver = self.baseline(), self.with_chunk(PARAMS_NEW)
+        keep = {k: v for k, v in saver.params.meta.items() if k not in RESOURCE_META_KEYS}
+        self.assertEqual(keep, base.params.meta)
+        self.assertEqual(saver.params.pos_prompt, base.params.pos_prompt)
+        self.assertEqual(saver.params.extra["lora"], base.params.extra["lora"])
+        self.assertEqual(saver.params.meta["Sampler"], "euler")  # the chunk says "Euler a"
+
+    def test_missing_chunk_changes_nothing(self):
+        base = self.baseline()
+        again = self.parse(self.png(basic_graph(), "again.png"))
+        self.assertEqual(again.raw_info, base.raw_info)
+        self.assertEqual(again.params.meta, base.params.meta)
+        self.assertEqual(set(again.params.extra), {"lora", "lyco"})
+
+    def test_broken_chunks_change_nothing(self):
+        base = self.baseline()
+        for text in ("", "garbage", "Steps: 1, Hashes: {", 'a\nSteps: 20, Civitai resources: [{"x":, Model hash: ',
+                     "Steps: " + "[" * 5000, "\x00\ufffd Steps: 1, Hashes: \"", "Negative prompt:"):
+            result = self.with_chunk(text)
+            self.assertEqual(result.raw_info, base.raw_info, text[:30])
+            self.assertEqual(result.params.meta, base.params.meta, text[:30])
+
+    def test_reading_the_chunk_never_fails_the_parse(self):
+        with mock.patch.object(adapter._core, "image_saver_resources", side_effect=RuntimeError("boom")):
+            result = self.with_chunk(PARAMS_NEW)
+        self.assertEqual(result.raw_info, self.baseline().raw_info)
+
+    def test_chunk_is_read_from_png_only(self):
+        path = self.dir / "a.png"
+        Image.new("RGB", (8, 12)).save(path)
+        with Image.open(path) as img:
+            img.info["parameters"] = PARAMS_NEW
+            self.assertEqual(adapter._get_resources(img), adapter._core.image_saver_resources(PARAMS_NEW))
+            img.format = "WEBP"
+            self.assertEqual(adapter._get_resources(img), {})
+
+    def test_graph_without_known_sampler_is_still_delegated(self):
+        g = basic_graph()
+        g["9"]["class_type"] = "SamplerCustomAdvanced"
+        stub = mock.Mock()
+        stub.parse.return_value = ImageGenerationInfo("from iib")
+        with mock.patch.object(adapter, "_BuiltinComfyUIParser", stub):
+            self.assertEqual(self.with_chunk(PARAMS_NEW, g).raw_info, "from iib")
+
+    def test_line_survives_iibs_parser(self):
+        """IIB's ``parse_generation_parameters`` reads the generated line back: same keys
+        and values as the plugin's meta, no stray keys, resources whole."""
+        for chunk in (PARAMS_NEW, PARAMS_OLD):
+            result = self.with_chunk(chunk)
+            iib = parse_generation_parameters(result.raw_info)["meta"]
+            own = {k: v for k, v in result.params.meta.items() if not k.startswith("final_")}
+            self.assertEqual(iib, own)
+            for key in RESOURCE_META_KEYS:
+                if key in own:
+                    self.assertEqual(iib[key], own[key])
+            self.assertEqual(json.loads(iib["Civitai resources"]), json.loads(compact(
+                CIVITAI_NEW if chunk is PARAMS_NEW else CIVITAI_OLD)))
+
+    def test_prompt_with_odd_characters_does_not_disturb_the_line(self):
+        g = basic_graph()
+        g["2"]["inputs"]["text"] = 'a "red" apple, Hashes: {x}, Steps: 5'
+        result = self.with_chunk(PARAMS_NEW, g)
+        self.assertEqual(result.params.meta["Hashes"], compact(HASHES_NEW))
 
 
 class Fallback(AdapterCase):
