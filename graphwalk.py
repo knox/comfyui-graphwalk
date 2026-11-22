@@ -89,16 +89,35 @@ COND_PASSTHROUGH = {
     "ConditioningSetTimestepRange",
     "ConditioningSetArea",
     "ConditioningSetAreaPercentage",
+    "ConditioningSetAreaStrength",
     "ConditioningSetMask",
     "unCLIPConditioning",
+    # Flux: FluxGuidance only stores a ``guidance`` value, which is not extracted
+    "FluxGuidance",
+    "FluxKontextMultiReferenceLatentMethod",
+    "ReferenceLatent",
 }
 
-TEXT_ENCODE_CLASSES = {
-    "CLIPTextEncode",
-    "CLIPTextEncodeSDXL",
-    "CLIPTextEncodeSDXLRefiner",
-    "smZ CLIPTextEncode",
-    "BNK_CLIPTextEncodeAdvanced",
+# Text encoders (the end of the conditioning chain): class -> the inputs holding the
+# prompt, in the order they are read. Equal texts count once, different ones are
+# joined with a line break (SDXL's global and local prompt, Flux's CLIP-L and T5 prompt).
+_LEGACY_TEXT_KEYS = ("text_g", "text_l", "text")  # smZ, BNK: read as before
+TEXT_ENCODERS = {
+    "CLIPTextEncode": ("text",),
+    "CLIPTextEncodeSDXL": ("text_g", "text_l"),
+    "CLIPTextEncodeSDXLRefiner": ("text",),
+    "smZ CLIPTextEncode": _LEGACY_TEXT_KEYS,
+    "BNK_CLIPTextEncodeAdvanced": _LEGACY_TEXT_KEYS,
+    "CLIPTextEncodeFlux": ("clip_l", "t5xxl"),
+    "CLIPTextEncodeSD3": ("clip_l", "clip_g", "t5xxl"),
+    "CLIPTextEncodeHiDream": ("clip_l", "clip_g", "t5xxl", "llama"),
+    "CLIPTextEncodeHunyuanDiT": ("bert", "mt5xl"),
+    "CLIPTextEncodeKandinsky5": ("clip_l", "qwen25_7b"),
+    "CLIPTextEncodeLumina2": ("user_prompt",),
+    "CLIPTextEncodePixArtAlpha": ("text",),
+    "TextEncodeHunyuanVideo_ImageToVideo": ("prompt",),
+    "TextEncodeQwenImageEdit": ("prompt",),
+    "TextEncodeQwenImageEditPlus": ("prompt",),
 }
 
 # Nodes that merge several conditioning inputs into one: the texts of all of them.
@@ -149,11 +168,24 @@ MODEL_SOURCE_WIDGETS = ("ckpt_name", "unet_name")
 
 # --- LATENT ----------------------------------------------------------------
 
-# Latent image nodes (source of width/height resolution)
+# Empty-latent nodes: where a generation starts, and the source of width/height. Any
+# other node named ``Empty…Latent…`` with ``width`` and ``height`` inputs counts as a
+# size source as well (see ``_is_size_source``); these are the known ones.
 LATENT_SIZE_CLASSES = {
     "EmptyLatentImage",
     "EmptySD3LatentImage",
     "EmptyHunyuanLatentVideo",
+    "EmptyHunyuanVideo15Latent",
+    "EmptyHunyuanImageLatent",
+    "EmptyFlux2LatentImage",
+    "EmptyQwenImageLayeredLatentImage",
+    "EmptyChromaRadianceLatentImage",
+    "EmptyHiDreamO1LatentImage",
+    "EmptyLTXVLatentVideo",
+    "EmptyMochiLatentVideo",
+    "EmptyCosmosLatentVideo",
+    "EmptyARVideoLatent",
+    "EmptyMiniMaxH3LatentAV",
 }
 # Inputs a latent-to-latent node (upscale, VAE round-trips, samplers, …) takes its
 # latent from; the first one that is connected is followed.
@@ -314,6 +346,18 @@ def _truthy(val) -> bool:
 def _flag(val):
     """``_truthy`` for a resolved flag, None when it could not be resolved."""
     return None if val is None or isinstance(val, (list, dict)) else _truthy(val)
+
+
+def _is_empty_latent(class_type: str) -> bool:
+    """An empty-latent node: where a generation starts (by table, or named ``Empty…Latent…``)."""
+    return class_type in LATENT_SIZE_CLASSES or (class_type.startswith("Empty") and "Latent" in class_type)
+
+
+def _is_size_source(class_type: str, inputs: dict) -> bool:
+    """An empty-latent node whose ``width`` / ``height`` are the image size."""
+    return class_type in LATENT_SIZE_CLASSES or (
+        _is_empty_latent(class_type) and "width" in inputs and "height" in inputs
+    )
 
 
 def _lora_stem(name: str) -> str:
@@ -508,7 +552,7 @@ class Walker:
 
     def _next_cond(self, hop: Hop):
         cls = hop.class_type
-        if cls in TEXT_ENCODE_CLASSES or cls in COND_BLANK:
+        if cls in TEXT_ENCODERS or cls in COND_BLANK:
             return None
         if cls in COND_COMBINE:
             return self._edges(hop, *COND_COMBINE_KEYS)
@@ -523,7 +567,7 @@ class Walker:
         return generic or None
 
     def _next_latent(self, hop: Hop):
-        if hop.class_type in LATENT_SIZE_CLASSES:
+        if _is_size_source(hop.class_type, hop.inputs):
             return None
         for key in LATENT_INPUTS:
             if _is_ref(hop.inputs.get(key)):
@@ -759,7 +803,7 @@ class Walker:
         """The prompt text a conditioning edge was encoded from (merged conditioning: all texts, joined)."""
         parts = []
         for hop in self.walk(ref, COND, None, "all", seen):
-            if hop.class_type not in TEXT_ENCODE_CLASSES:
+            if hop.class_type not in TEXT_ENCODERS:
                 continue
             with self.nested():
                 text = self._encode_text(hop)
@@ -768,9 +812,8 @@ class Walker:
         return ", ".join(parts)
 
     def _encode_text(self, hop: Hop) -> str:
-        # CLIPTextEncodeSDXL exposes both text_g (global) and text_l (local)
         parts = []
-        for key in ("text_g", "text_l", "text"):
+        for key in TEXT_ENCODERS[hop.class_type]:
             val = hop.inputs.get(key)
             if val is None:
                 continue
@@ -894,7 +937,7 @@ class Walker:
     def latent_size(self, ref):
         """(width, height) if the latent originates from an empty-latent node, otherwise (None, None)."""
         hop = self.follow(ref, LATENT)
-        if hop is None or hop.class_type not in LATENT_SIZE_CLASSES:
+        if hop is None or not _is_size_source(hop.class_type, hop.inputs):
             return None, None
         width = self.scalar(hop.inputs.get("width"), "width", size=True, seen=hop.seen)
         height = self.scalar(hop.inputs.get("height"), "height", size=True, seen=hop.seen)
