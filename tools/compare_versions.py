@@ -17,7 +17,8 @@ Usage (Pillow required):
 
 Fields compared: the keys of ``extract_from_prompt`` (``positive``, ``negative``,
 ``seed``, ``steps``, ``cfg``, ``sampler_name``, ``scheduler``, ``model_name``,
-``width``, ``height``, ``loras``), ``None`` vs. dict (``<result>``), and the
+``width``, ``height``, ``loras``, ``clip_skip``; a version without a key counts as ``None``
+there), ``None`` vs. dict (``<result>``), and the
 ``format_a1111`` string (``<a1111>``). A version raising an exception counts as
 ``<raises>``.
 
@@ -36,7 +37,7 @@ from PIL import Image
 EXTENSIONS = {".png", ".webp", ".jpg", ".jpeg"}
 INFO_KEYS = (
     "positive", "negative", "seed", "steps", "cfg", "sampler_name",
-    "scheduler", "model_name", "width", "height", "loras",
+    "scheduler", "model_name", "width", "height", "loras", "clip_skip",
 )
 
 
