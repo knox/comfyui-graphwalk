@@ -24,10 +24,10 @@ prints the A1111 result, or with ``--trace`` the path taken for every field.
 How it is built: one walker (``Walker``) follows an edge ``[node_id, slot]``
 backwards through the nodes that merely pass a signal on, and stops at the first
 node that really is the source. What "passes a signal on" means is decided per
-signal type (CONDITIONING, MODEL, LATENT, STRING, scalar, IMAGE and the custom
+signal type (CONDITIONING, MODEL, CLIP, LATENT, STRING, scalar, IMAGE and the custom
 sampler's GUIDER, SAMPLER, SIGMAS, NOISE) by ``Walker._next_*`` and the rule tables
 below. Consumers (``cond_text``, ``text``, ``scalar``, ``model_name``, ``loras``,
-``latent_size``) read the source node they arrive at. The walker does not know the
+``clip_skip``, ``latent_size``) read the source node they arrive at. The walker does not know the
 sampler: any edge can be resolved.
 
 Principle: better empty than wrong. Where a rule is not known, the value stays
@@ -67,6 +67,7 @@ __all__ = [
 
 COND = "CONDITIONING"
 MODEL = "MODEL"
+CLIP = "CLIP"  # the clip input of the first text encoder, back to the CLIPSetLastLayer that set its layer
 LATENT = "LATENT"
 TEXT = "STRING"
 SCALAR = "SCALAR"  # seed, steps, cfg, names, flags, sizes: a literal widget value
@@ -223,6 +224,24 @@ MODEL_LOADERS = {
 # all, so it must create the model) is read through these widgets. Not
 # ``model_name``: upscale models, detectors and many others use it.
 MODEL_SOURCE_WIDGETS = ("ckpt_name", "unet_name")
+
+# --- CLIP ------------------------------------------------------------------
+
+# Nodes that set the last CLIP layer (clip skip): class -> the widget holding it. The first
+# one on the way back from a text encoder counts, the walk ends there. The widget is -clip skip.
+CLIP_SOURCES = {
+    "CLIPSetLastLayer": "stop_at_clip_layer",
+}
+# Nodes that pass the ``clip`` input on to their CLIP output (the LoRA loaders). Unknown
+# nodes with a ``clip`` input are followed as well (marked "generic" in the trace), this
+# list is the known part. A loader that creates the CLIP model ends the walk without a value.
+CLIP_PASSTHROUGH = {
+    "LoraLoader",
+    "Power Lora Loader (rgthree)",
+    "Lora Loader Stack (rgthree)",
+    "Lora Loader (LoraManager)",
+    "LoRA Text Loader (LoraManager)",
+}
 
 # --- LATENT ----------------------------------------------------------------
 
@@ -687,6 +706,8 @@ class Walker:
             return self._edges(hop, "sigmas") if hop.class_type in SIGMAS_PASSTHROUGH else None
         if signal in (GUIDER, SAMPLER, NOISE):  # sources only: no node passes these on
             return None
+        if signal == CLIP:
+            return self._next_clip(hop)
         if signal == MODEL:
             return self._edges(hop, "model") or self._edges(hop, "model1", "model2") or None
         if signal == LATENT:
@@ -731,6 +752,14 @@ class Walker:
         if generic:
             self.log("  (generic: unknown node, its 'conditioning' input is followed)")
         return generic or None
+
+    def _next_clip(self, hop: Hop):
+        if hop.class_type in CLIP_SOURCES:
+            return None
+        edges = self._edges(hop, "clip")
+        if edges and hop.class_type not in CLIP_PASSTHROUGH:
+            self.log("  (generic: unknown node, its 'clip' input is followed)")
+        return edges or None
 
     def _next_latent(self, hop: Hop):
         if _is_size_source(hop.class_type, hop.inputs):
@@ -1111,6 +1140,32 @@ class Walker:
             out.extend(_lm_widget_loras(hop.inputs.get("loras")) or [])
         return out
 
+    # --- clip skip -----------------------------------------------------------
+
+    def clip_skip(self, ref):
+        """
+        The clip skip of the first text encoder the conditioning edge ``ref`` reaches: from its
+        ``clip`` input back through the nodes that pass CLIP on (``CLIP_PASSTHROUGH``, any node
+        with a ``clip`` input) to the first ``CLIP_SOURCES`` node, whose layer is negated
+        (-2 gives 2). None when the walk ends at anything else (a loader, say), the layer is
+        not resolved or it is not a negative whole number.
+        """
+        encoder = next((hop for hop in self.walk(ref, COND, None, "all") if hop.class_type in TEXT_ENCODERS), None)
+        if encoder is None:
+            return None
+        self.log(f"  (first text encoder: #{encoder.node_id}, its 'clip' input is followed)")
+        source = self.follow(encoder.inputs.get("clip"), CLIP, None, encoder.seen)
+        widget = CLIP_SOURCES.get(source.class_type) if source else None
+        if widget is None:
+            return None
+        layer = self.scalar(source.inputs.get(widget), widget, seen=source.seen)
+        try:
+            number = float(layer)
+        except (TypeError, ValueError):
+            return None
+        skip = -int(number) if number.is_integer() else 0
+        return skip if skip >= 1 else None
+
     # --- latent size ---------------------------------------------------------
 
     def latent_size(self, ref):
@@ -1354,6 +1409,7 @@ def _extract_fields(walker: Walker, src: dict) -> dict:
         "width": width,
         "height": height,
         "loras": field("loras", lambda: walker.loras(src["model"]), []),
+        "clip_skip": field("clip_skip", lambda: walker.clip_skip(src["positive"]), None),
     }
 
 
@@ -1394,6 +1450,8 @@ def extract_from_prompt(prompt: dict) -> dict | None:
     - ``model_name``: checkpoint / unet file name as in the graph (str)
     - ``width``, ``height``: latent size, None if not from an empty-latent node
     - ``loras``: list of (name, weight) tuples on the sampler's model chain
+    - ``clip_skip``: int >= 1 from the ``CLIPSetLastLayer`` on the clip path of the positive
+      prompt's first text encoder (-2 is 2), None without one
     """
     return _extract(prompt, None)
 

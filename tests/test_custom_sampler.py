@@ -54,7 +54,7 @@ class SamplerCustom(unittest.TestCase):
             info,
             {"positive": POSITIVE, "negative": NEGATIVE, "seed": 42, "steps": 30, "cfg": 6.5,
              "sampler_name": "dpmpp_2m", "scheduler": "karras", "model_name": "SD15/apple_model.safetensors",
-             "width": 512, "height": 768, "loras": []},
+             "width": 512, "height": 768, "loras": [], "clip_skip": None},
         )
 
     def test_without_noise_there_is_no_seed(self):
@@ -92,7 +92,7 @@ class SamplerCustomAdvanced(unittest.TestCase):
             info,
             {"positive": POSITIVE, "negative": NEGATIVE, "seed": 42, "steps": 28, "cfg": 3.5,
              "sampler_name": "euler", "scheduler": "simple", "model_name": "SD15/apple_model.safetensors",
-             "width": 512, "height": 768, "loras": []},
+             "width": 512, "height": 768, "loras": [], "clip_skip": None},
         )
 
     def test_found_from_the_output_and_by_signature(self):
@@ -292,7 +292,8 @@ class NewerModelGraph(unittest.TestCase):
             info,
             {"positive": POSITIVE, "negative": "", "seed": 1234, "steps": 20, "cfg": None,
              "sampler_name": "euler", "scheduler": "flux2", "model_name": "flux/apple_flux.safetensors",
-             "width": 1024, "height": 1536, "loras": [("styles/pastel.safetensors", 0.7)]},
+             "width": 1024, "height": 1536, "loras": [("styles/pastel.safetensors", 0.7)],
+             "clip_skip": None},
         )
         self.assertEqual(
             graphwalk.format_a1111(info),

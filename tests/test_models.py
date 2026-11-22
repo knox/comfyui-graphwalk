@@ -79,7 +79,7 @@ class ConditioningPassthrough(unittest.TestCase):
         self.assertEqual(
             set(extract(g)),
             {"positive", "negative", "seed", "steps", "cfg", "sampler_name", "scheduler", "model_name", "width",
-             "height", "loras"},
+             "height", "loras", "clip_skip"},
         )
 
 

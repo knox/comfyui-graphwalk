@@ -38,7 +38,7 @@ class Baseline(unittest.TestCase):
         self.assertEqual(
             set(info),
             {"positive", "negative", "seed", "steps", "cfg", "sampler_name", "scheduler",
-             "model_name", "width", "height", "loras"},
+             "model_name", "width", "height", "loras", "clip_skip"},
         )
         self.assertEqual(info["positive"], POSITIVE)
         self.assertEqual(info["negative"], NEGATIVE)

@@ -569,6 +569,11 @@ hand.
 - Loaders with the file name in `unet_name`: `UNETLoader` · `UNet loader with Name (Image Saver)` · `UnetLoaderGGUF` · `UnetLoaderGGUFAdvanced` · `Unet Loader (LoraManager)` · `Random Unet Loader (LoraManager)` · `UNETLoaderMultiGPU` · `UnetLoaderGGUFMultiGPU`
 - A node of any other class at the end of the model chain: `ckpt_name` · `unet_name`
 
+#### Clip skip
+
+- `CLIPSetLastLayer`: `stop_at_clip_layer` (the clip skip is its negative; the first one on the way back from the encoder counts)
+- Passing CLIP on through its `clip` input (any other node with one is followed as well): `Lora Loader (LoraManager)` · `Lora Loader Stack (rgthree)` · `LoRA Text Loader (LoraManager)` · `LoraLoader` · `Power Lora Loader (rgthree)`
+
 #### Empty latents
 
 - `EmptyARVideoLatent` · `EmptyChromaRadianceLatentImage` · `EmptyCosmosLatentVideo` · `EmptyFlux2LatentImage` · `EmptyHiDreamO1LatentImage` · `EmptyHunyuanImageLatent` · `EmptyHunyuanLatentVideo` · `EmptyHunyuanVideo15Latent` · `EmptyLatentImage` · `EmptyLTXVLatentVideo` · `EmptyMiniMaxH3LatentAV` · `EmptyMochiLatentVideo` · `EmptyQwenImageLayeredLatentImage` · `EmptySD3LatentImage`

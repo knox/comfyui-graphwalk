@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Markdown lists of the node classes ``graphwalk.py`` knows, generated from its rule
-tables (``SAMPLER_CLASSES``, ``SWITCHES``, ``MODEL_LOADERS``, ``OUTPUT_WIDGETS``, ...).
+tables (``SAMPLER_CLASSES``, ``SWITCHES``, ``MODEL_LOADERS``, ``CLIP_SOURCES``, ``OUTPUT_WIDGETS``, ...).
 
 The README embeds the result between the markers ``<!-- supported-nodes:begin -->`` and
 ``<!-- supported-nodes:end -->``, so the list of supported nodes is never maintained by
@@ -179,6 +179,14 @@ def render(core) -> str:
         classes = [cls for cls, value in t.MODEL_LOADERS.items() if value == widgets]
         bullet(f"Loaders with the file name in {_names(widgets)}: {_names(classes)}")
     bullet(f"A node of any other class at the end of the model chain: {_names(t.MODEL_SOURCE_WIDGETS)}")
+
+    section("Clip skip")
+    for cls, widget in t.CLIP_SOURCES.items():
+        bullet(f"`{cls}`: `{widget}` (the clip skip is its negative; the first one on the way back from the encoder counts)")
+    bullet(
+        f"Passing CLIP on through its `clip` input (any other node with one is followed as well): "
+        f"{_names(_sorted(t.CLIP_PASSTHROUGH))}"
+    )
 
     section("Empty latents")
     bullet(_names(_sorted(t.LATENT_SIZE_CLASSES)))
