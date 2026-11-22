@@ -289,18 +289,18 @@ class Robustness(unittest.TestCase):
 
     def test_failing_field_does_not_cost_the_others(self):  # finding 9
         g = basic_graph()
-        orig = graphwalk.get_conditioning_text
+        orig = graphwalk.Walker.cond_text
 
-        def boom(prompt, cond_ref, _seen=None):
+        def boom(self, cond_ref, seen=frozenset()):
             if cond_ref == ref(2):
                 raise RuntimeError("boom")
-            return orig(prompt, cond_ref, _seen)
+            return orig(self, cond_ref, seen)
 
-        graphwalk.get_conditioning_text = boom
+        graphwalk.Walker.cond_text = boom
         try:
             info = extract(g)
         finally:
-            graphwalk.get_conditioning_text = orig
+            graphwalk.Walker.cond_text = orig
         self.assertEqual(info["positive"], "")
         self.assertEqual(info["negative"], NEGATIVE)
         self.assertEqual(info["steps"], 20)
