@@ -242,7 +242,9 @@ class Main:
         # ``key: value`` pairs, which a graph with few resolved fields does not.
         # So IIB parses the prompt part with a stand-in parameters line (for the
         # prompt tags) and meta and LoRAs come from the extracted fields.
-        prompt_text = _core.a1111_prompt_text(info)
+        # IIB splits prompt tags at commas only: without the comma the last phrase
+        # and the first <lora:…> tag would form one tag, and the phrase be lost.
+        prompt_text = _core.a1111_prompt_text(info, lora_separator=", ")
         params = parse_generation_parameters(f"{prompt_text}\n{_PARAMS_SENTINEL}" if prompt_text else _PARAMS_SENTINEL)
         meta = _meta_from_info(info)
         params["meta"] = meta

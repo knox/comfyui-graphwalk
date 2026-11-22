@@ -117,7 +117,8 @@ backwards from the sampler node — through LoRA loaders, Reroutes, conditioning
 and other intermediates — until it reaches the source values (checkpoint name, CLIP
 encoders, latent size, seed/steps/CFG scalars). These are assembled into an A1111-style
 `parameters` string, so tags, search and "Send to txt2img" keep working. IIB's
-`parse_generation_parameters` turns the prompt part into prompt tags; the metadata
+`parse_generation_parameters` turns the prompt part into prompt tags (given a comma
+before the LoRA tags, so the last phrase of the prompt stays a tag of its own); the metadata
 (`Steps`, `Sampler`, `CFG scale`, `Seed`, `Size`, `Model`, `Source Identifier`) and the
 LoRA list come straight from the extracted fields, so they are complete even when only
 a few parameters could be resolved and also cover LoRAs IIB's own `<lora:…>` pattern

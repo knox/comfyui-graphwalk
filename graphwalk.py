@@ -887,13 +887,16 @@ def _lora_tags(info: dict) -> str:
     return " ".join(f"<lora:{stem}:{w:g}>" for stem, w in lora_entries(info))
 
 
-def a1111_prompt_text(info: dict) -> str:
-    """Positive prompt (with LoRA tags) and ``Negative prompt:`` line, no parameters line."""
+def a1111_prompt_text(info: dict, lora_separator: str = " ") -> str:
+    """
+    Positive prompt (with LoRA tags) and ``Negative prompt:`` line, no parameters
+    line. ``lora_separator`` goes between the positive text and the LoRA tags.
+    """
     lines = []
     positive = (info.get("positive") or "").strip()
     lora_tags = _lora_tags(info)
     if lora_tags:
-        positive = f"{positive} {lora_tags}".strip()
+        positive = f"{positive}{lora_separator}{lora_tags}" if positive else lora_tags
     if positive:
         lines.append(positive)
 

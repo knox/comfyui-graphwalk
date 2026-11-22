@@ -72,7 +72,8 @@ class NormalImages(AdapterCase):
         info = adapter.extract_from_prompt(graph)
         reference = parse_generation_parameters(adapter.format_a1111(info) + ", Source Identifier: ComfyUI")
         self.assertEqual(result.params.meta, reference["meta"] | {"final_width": 8, "final_height": 12})
-        self.assertEqual(result.params.pos_prompt, reference["pos_prompt"])
+        # The text round-trip loses the last phrase before the LoRA tags (see Loras).
+        self.assertEqual(result.params.pos_prompt, reference["pos_prompt"] + [POSITIVE])
         self.assertEqual(result.params.extra["lora"], reference["lora"])
         self.assertEqual(result.params.extra["lyco"], reference["lyco"])
         self.assertEqual(self.lora_names(result), ["pastel v1.5"])
@@ -128,6 +129,14 @@ class Loras(AdapterCase):
     def test_lora_tags_stay_in_the_prompt_text(self):
         result = self.parse(self.png(lora_graph()))
         self.assertIn("<lora:pastel_v1.5:0.8>", result.raw_info)
+
+    def test_last_phrase_before_the_lora_tags_is_a_prompt_tag(self):
+        g = lora_graph()
+        g["2"]["inputs"]["text"] = "a red apple, on a wooden table"
+        result = self.parse(self.png(g))
+        self.assertEqual(result.params.pos_prompt, ["a red apple", "on a wooden table"])
+        self.assertEqual(self.lora_names(result), ["pastel v1.5"])
+        self.assertIn("on a wooden table <lora:pastel_v1.5:0.8>", result.raw_info)
 
     def test_lora_typed_in_the_prompt_text_is_kept(self):
         g = basic_graph()
