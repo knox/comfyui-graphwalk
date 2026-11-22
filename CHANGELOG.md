@@ -7,8 +7,9 @@ All notable changes to this project are documented here. The format follows
 ## [2.0.0] - 2026-11-22
 
 The public interface of `graphwalk.py` (`extract_from_prompt`, `format_a1111` and the
-other names in `__all__`) is unchanged; the output and the internals are not. The
-internal functions of 1.x (`resolve_text`, `collect_loras`, `get_scalar`, …) are gone.
+other names in `__all__`) is unchanged, its result dict only gains `clip_skip`; the
+output and the internals change. The internal functions of 1.x (`resolve_text`,
+`collect_loras`, `get_scalar`, …) are gone.
 
 ### Changed
 
@@ -37,6 +38,12 @@ internal functions of 1.x (`resolve_text`, `collect_loras`, `get_scalar`, …) a
 - Resources of Image Saver PNGs: `Model hash`, `Hashes`, `Lora hashes` and
   `Civitai resources`, in the metadata and in `extra`; `image_saver_resources()` reads
   them from an A1111 text.
+- Clip skip: `clip_skip` in the result of `extract_from_prompt`, the negated layer of the
+  first `CLIPSetLastLayer` on the CLIP path of the positive prompt's text encoder
+  (through LoRA loaders, `Reroute`, switches and any node with a `clip` input), `None`
+  without one; `Clip skip: N` in the parameters line and the metadata for N > 1, after
+  `Model`, as A1111 writes it. It is not a tag, and the `Clip skip` of an Image Saver
+  `parameters` chunk is not used.
 - Trace mode: `python3 graphwalk.py <image.png | prompt.json> [--trace]` and
   `trace_from_prompt()`.
 - `graphwalk.__version__`, `tools/supported_nodes.py`, more tests and CI on Python 3.10
