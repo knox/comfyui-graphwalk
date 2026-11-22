@@ -46,7 +46,7 @@ class Baseline(unittest.TestCase):
         g = basic_graph()
         del g["9"]
         self.assertIsNone(extract(g))
-        g = {"1": node("SamplerCustomAdvanced", noise=ref(2))}
+        g = {"1": node("KSamplerSelect", sampler_name="euler")}
         self.assertIsNone(extract(g))
 
 

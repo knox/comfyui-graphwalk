@@ -6,7 +6,7 @@ Finds the sampler a picture was made by (from the output node back through decod
 and upscale to the first pass, see ``_find_output_sampler``), walks the ComfyUI API
 ``prompt`` graph backwards from it, resolving the real values through Reroute /
 LoRA-loader / conditioning / switch chains, and formats them as an A1111-style
-``parameters`` string.
+``parameters`` string. KSampler-like samplers and SamplerCustom(Advanced) are read.
 
 Standard library only, no IIB or PIL: the caller reads the ``prompt`` chunk from
 the image and passes the parsed dict. The IIB plugin (``main.py``) is a thin
@@ -24,7 +24,8 @@ prints the A1111 result, or with ``--trace`` the path taken for every field.
 How it is built: one walker (``Walker``) follows an edge ``[node_id, slot]``
 backwards through the nodes that merely pass a signal on, and stops at the first
 node that really is the source. What "passes a signal on" means is decided per
-signal type (CONDITIONING, MODEL, LATENT, STRING, scalar, IMAGE) by ``Walker._next_*`` and the rule tables
+signal type (CONDITIONING, MODEL, LATENT, STRING, scalar, IMAGE and the custom
+sampler's GUIDER, SAMPLER, SIGMAS, NOISE) by ``Walker._next_*`` and the rule tables
 below. Consumers (``cond_text``, ``text``, ``scalar``, ``model_name``, ``loras``,
 ``latent_size``) read the source node they arrive at. The walker does not know the
 sampler: any edge can be resolved.
@@ -68,6 +69,11 @@ TEXT = "STRING"
 SCALAR = "SCALAR"  # seed, steps, cfg, names, flags, sizes: a literal widget value
 LORA_STACK = "LORA_STACK"  # LoraManager's stack of LoRAs, passed from Stacker to Stacker
 IMAGE = "IMAGE"  # a picture on its way back from an output node through the decode to the first latent
+# The inputs of the custom samplers (SamplerCustom, SamplerCustomAdvanced), each a node of its own.
+GUIDER = "GUIDER"
+SAMPLER = "SAMPLER"
+SIGMAS = "SIGMAS"
+NOISE = "NOISE"
 
 # ---------------------------------------------------------------------------
 # Rule tables: which node classes do what
@@ -85,8 +91,12 @@ SAMPLER_CLASSES = {
     "Tiled KSampler",
     "BNK_Unsampler",
 }
-# The signature: all of these inputs, plus a seed (``seed`` or ``noise_seed``).
+# Samplers whose guider, sampler, sigmas and noise are nodes of their own.
+CUSTOM_SAMPLERS = {"SamplerCustom": "custom", "SamplerCustomAdvanced": "advanced"}
+# The signatures (all of these inputs, plus a seed and ``steps`` for the KSampler kind).
 SAMPLER_SIGNATURE = frozenset({"model", "positive", "negative", "latent_image", "steps"})
+CUSTOM_SIGNATURE = frozenset({"model", "positive", "negative", "sampler", "sigmas", "latent_image", "noise_seed"})
+ADVANCED_SIGNATURE = frozenset({"noise", "guider", "sampler", "sigmas", "latent_image"})
 
 # --- Output nodes (where the search for the sampler starts) ----------------
 
@@ -238,6 +248,84 @@ LATENT_INPUTS = ("latent", "latent_image", "samples", "LATENT")
 
 # A "W×H" / "WxH" size inside a label, e.g. "Portrait 2:3 · 1152×1728 · 1.9 MP".
 SIZE_IN_LABEL = re.compile(r"(\d+)\s*[×x]\s*(\d+)")
+
+# --- Inputs of the custom samplers ---------------------------------------------
+
+
+class Guider(NamedTuple):
+    """The inputs of a guider node that hold the positive and negative conditioning and the CFG."""
+
+    positive: str | None
+    negative: str | None = None
+    cfg: str | None = None
+
+
+# Guiders (SamplerCustomAdvanced's ``guider``); the model is always the ``model`` input.
+# Anything that is not here is not read. DualCFGGuider has two CFG scales and a second
+# conditioning with no counterpart in an A1111 line: only ``cond1`` and ``negative`` are read.
+GUIDERS = {
+    "CFGGuider": Guider("positive", "negative", "cfg"),
+    "BasicGuider": Guider("conditioning"),  # no negative prompt, no CFG
+    "DualCFGGuider": Guider("cond1", "negative"),
+    "DualModelGuider": Guider("positive", "negative", "cfg"),
+    "PerpNegGuider": Guider("positive", "negative", "cfg"),
+    "LTXVDualCFGGuider": Guider("positive", "negative", "video_cfg"),
+    "ScheduledCFGGuidance": Guider("positive", "negative", "cfg"),  # comfyui-kjnodes
+}
+
+# Noise nodes (``noise``): class -> the widget holding the seed (None: no noise, no seed).
+NOISE_SEEDS = {
+    "RandomNoise": "noise_seed",
+    "DisableNoise": None,
+}
+
+# Sampler nodes (``sampler``): class -> the sampler name, None where the node has a
+# ``sampler_name`` widget. The SDE samplers add ``_gpu`` unless their ``noise_device`` is
+# ``cpu``, as the nodes do themselves.
+SAMPLER_NODES = {
+    "KSamplerSelect": None,
+    "SamplerEulerAncestral": "euler_ancestral",
+    "SamplerEulerAncestralCFGPP": "euler_ancestral_cfg_pp",
+    "SamplerDPMPP_2S_Ancestral": "dpmpp_2s_ancestral",
+    "SamplerLMS": "lms",
+    "SamplerDPMAdaptative": "dpm_adaptive",
+    "SamplerER_SDE": "er_sde",
+    "SamplerDPMPP_3M_SDE": "dpmpp_3m_sde",
+    "SamplerDPMPP_2M_SDE": "dpmpp_2m_sde",
+    "SamplerDPMPP_SDE": "dpmpp_sde",
+}
+SAMPLER_NOISE_DEVICE = {"SamplerDPMPP_3M_SDE", "SamplerDPMPP_2M_SDE", "SamplerDPMPP_SDE"}
+
+# Scheduler nodes (``sigmas``): class -> the name shown as the scheduler, None where the
+# node has a ``scheduler`` widget. The names are those of ComfyUI's own schedulers where
+# there is one (``karras``, ``exponential``, ``beta``; A1111 has the same), else the
+# node's short name. All of them have a ``steps`` input.
+SCHEDULERS = {
+    "BasicScheduler": None,
+    "KarrasScheduler": "karras",
+    "ExponentialScheduler": "exponential",
+    "PolyexponentialScheduler": "polyexponential",
+    "LaplaceScheduler": "laplace",
+    "BetaSamplingScheduler": "beta",
+    "VPScheduler": "vp",
+    "SDTurboScheduler": "sd_turbo",
+    "AlignYourStepsScheduler": "align_your_steps",
+    "GITSScheduler": "gits",
+    "OptimalStepsScheduler": "optimal_steps",
+    "Flux2Scheduler": "flux2",
+    "LTXVScheduler": "ltxv",
+    "Ideogram4Scheduler": "ideogram4",
+}
+# Nodes that take sigmas and give sigmas: the scheduler behind them is the source.
+SIGMAS_PASSTHROUGH = {
+    "FlipSigmas",
+    "SetFirstSigma",
+    "SplitSigmas",
+    "SplitSigmasDenoise",
+    "ExtendIntermediateSigmas",
+}
+# ... but these change the number of steps: the steps of the scheduler would be wrong.
+SIGMAS_RESIZERS = {"SplitSigmas", "SplitSigmasDenoise", "ExtendIntermediateSigmas"}
 
 # --- STRING / scalar -------------------------------------------------------
 
@@ -406,10 +494,19 @@ def _is_size_source(class_type: str, inputs: dict) -> bool:
 
 
 def _sampler_kind(class_type: str, inputs: dict):
-    """``"ksampler"`` or None: a sampler by class where it is known, else by the inputs the node has."""
+    """
+    ``"ksampler"``, ``"custom"`` (SamplerCustom), ``"advanced"`` (SamplerCustomAdvanced) or
+    None: by class where it is known, else by the inputs the node has.
+    """
     if class_type in SAMPLER_CLASSES:
         return "ksampler"
+    if class_type in CUSTOM_SAMPLERS:
+        return CUSTOM_SAMPLERS[class_type]
     keys = inputs.keys()
+    if ADVANCED_SIGNATURE <= keys:
+        return "advanced"
+    if CUSTOM_SIGNATURE <= keys:
+        return "custom"
     if SAMPLER_SIGNATURE <= keys and ("seed" in keys or "noise_seed" in keys):
         return "ksampler"
     return None
@@ -583,6 +680,10 @@ class Walker:
             return self._next_cond(hop)
         if signal == IMAGE:
             return self._next_image(hop)
+        if signal == SIGMAS:
+            return self._edges(hop, "sigmas") if hop.class_type in SIGMAS_PASSTHROUGH else None
+        if signal in (GUIDER, SAMPLER, NOISE):  # sources only: no node passes these on
+            return None
         if signal == MODEL:
             return self._edges(hop, "model") or self._edges(hop, "model1", "model2") or None
         if signal == LATENT:
@@ -1110,8 +1211,10 @@ def _ksampler_sources(inputs: dict) -> dict:
     """
     Where a sampler keeps what the extraction needs: edges for ``positive``,
     ``negative``, ``model`` and ``latent``, and for each scalar its stored value (a
-    literal or an edge) together with the name of the field. A sampler of another
-    shape gets its own function like this one.
+    literal or an edge) together with the name of the field. A KSampler has all of
+    them as inputs; the samplers below take them from the nodes they are wired to, but
+    return the same: the values are those nodes' inputs, resolved to the edge or literal
+    there.
     """
     # KSamplerAdvanced and its variants name the seed ``noise_seed``.
     seed_key = "noise_seed" if "noise_seed" in inputs else "seed"
@@ -1123,6 +1226,99 @@ def _ksampler_sources(inputs: dict) -> dict:
         "seed": (inputs.get(seed_key), seed_key),
         **{key: (inputs.get(key), key) for key in ("steps", "cfg", "sampler_name", "scheduler")},
     }
+
+
+def _sampler_name_source(walker: Walker, ref):
+    """``sampler_name`` of a ``sampler`` edge (KSamplerSelect and the like), as a (value, field) pair."""
+    hop = walker.follow(ref, SAMPLER)
+    name = SAMPLER_NODES.get(hop.class_type, False) if hop else False
+    if name is False:
+        return None, "sampler_name"
+    walker.log(f"  sampler: #{hop.node_id} {hop.class_type}")
+    if name is None:
+        return hop.inputs.get("sampler_name"), "sampler_name"
+    if hop.class_type in SAMPLER_NOISE_DEVICE:
+        device = walker.scalar(hop.inputs.get("noise_device"), "noise_device", seen=hop.seen)
+        if device not in ("cpu", "gpu"):
+            return None, "sampler_name"
+        name += "_gpu" if device == "gpu" else ""
+    return name, "sampler_name"
+
+
+def _sigmas_sources(walker: Walker, ref) -> dict:
+    """
+    Steps and scheduler of a ``sigmas`` edge as (value, field) pairs, and the scheduler's
+    ``model`` edge. The scheduler is the node the sigmas come from; passthrough nodes in
+    between that change the number of steps leave the steps empty.
+    """
+    hops = list(walker.walk(ref, SIGMAS))
+    source = hops[-1] if hops and hops[-1].terminal and hops[-1].class_type in SCHEDULERS else None
+    if source is None:
+        return {"steps": (None, "steps"), "scheduler": (None, "scheduler"), "model": None}
+    walker.log(f"  sigmas: #{source.node_id} {source.class_type}")
+    fixed = SCHEDULERS[source.class_type]
+    resized = any(hop.class_type in SIGMAS_RESIZERS for hop in hops)
+    return {
+        "steps": (None if resized else source.inputs.get("steps"), "steps"),
+        "scheduler": (source.inputs.get("scheduler") if fixed is None else fixed, "scheduler"),
+        "model": source.inputs.get("model"),
+    }
+
+
+def _custom_sources(walker: Walker, inputs: dict) -> dict:
+    """``SamplerCustom``: ``sampler`` and ``sigmas`` are nodes, the rest are its own inputs."""
+    sigmas = _sigmas_sources(walker, inputs.get("sigmas"))
+    seed = (inputs.get("noise_seed"), "noise_seed")
+    if _flag(walker.scalar(inputs.get("add_noise"), "add_noise")) is False:
+        seed = (None, "noise_seed")  # without noise the seed does nothing
+    return {
+        "positive": inputs.get("positive"),
+        "negative": inputs.get("negative"),
+        "model": inputs.get("model"),
+        "latent": inputs.get("latent_image"),
+        "seed": seed,
+        "steps": sigmas["steps"],
+        "cfg": (inputs.get("cfg"), "cfg"),
+        "sampler_name": _sampler_name_source(walker, inputs.get("sampler")),
+        "scheduler": sigmas["scheduler"],
+    }
+
+
+def _advanced_sources(walker: Walker, inputs: dict) -> dict:
+    """``SamplerCustomAdvanced``: noise, guider, sampler and sigmas are nodes."""
+    sigmas = _sigmas_sources(walker, inputs.get("sigmas"))
+    guider = walker.follow(inputs.get("guider"), GUIDER)
+    rule = GUIDERS.get(guider.class_type) if guider else None
+    given = guider.inputs if rule else {}
+    if rule:
+        walker.log(f"  guider: #{guider.node_id} {guider.class_type}")
+    noise = walker.follow(inputs.get("noise"), NOISE)
+    seed_key = NOISE_SEEDS.get(noise.class_type) if noise else None
+    if noise:
+        walker.log(f"  noise: #{noise.node_id} {noise.class_type}")
+    return {
+        "positive": given.get(rule.positive) if rule and rule.positive else None,
+        "negative": given.get(rule.negative) if rule and rule.negative else None,
+        # the guider's model; without a known guider the scheduler's, if it has one
+        "model": given.get("model") if rule else sigmas["model"],
+        "latent": inputs.get("latent_image"),
+        "seed": (noise.inputs.get(seed_key) if seed_key else None, "noise_seed"),
+        "steps": sigmas["steps"],
+        "cfg": (given.get(rule.cfg) if rule and rule.cfg else None, "cfg"),
+        "sampler_name": _sampler_name_source(walker, inputs.get("sampler")),
+        "scheduler": sigmas["scheduler"],
+    }
+
+
+def _sampler_sources(walker: Walker, node: dict) -> dict:
+    """What ``_extract_fields`` reads, for a sampler node of any kind (see ``_sampler_kind``)."""
+    inputs = node["inputs"] if isinstance(node.get("inputs"), dict) else {}
+    kind = _sampler_kind(node["class_type"], inputs)
+    if kind == "custom":
+        return _custom_sources(walker, inputs)
+    if kind == "advanced":
+        return _advanced_sources(walker, inputs)
+    return _ksampler_sources(inputs)
 
 
 def _extract_fields(walker: Walker, src: dict) -> dict:
@@ -1171,7 +1367,7 @@ def _extract(prompt, trace: list | None):
         found = (*fallback, "no output node leads to a sampler")
     nid, node, reason = found
     walker.log(f"sampler #{nid} {node['class_type']} ({reason})")
-    return _extract_fields(walker, _ksampler_sources(node["inputs"] if isinstance(node.get("inputs"), dict) else {}))
+    return _extract_fields(walker, _sampler_sources(walker, node))
 
 
 def extract_from_prompt(prompt: dict) -> dict | None:
