@@ -170,10 +170,11 @@ def _switch_selected(prompt: dict, class_type: str, inputs: dict):
                 return other
         return None
     if class_type == ANY_SWITCH:
-        for key, val in inputs.items():
-            if key.startswith("any_") and _is_ref(val):
-                return val
-        return None
+        # By slot number, not by the key order of the stored prompt.
+        slots = sorted(
+            (int(key[4:]), val) for key, val in inputs.items() if re.fullmatch(r"any_\d+", key) and _is_ref(val)
+        )
+        return slots[0][1] if slots else None
     if not _is_switch(class_type):
         return None
     select = inputs.get("select", 1)

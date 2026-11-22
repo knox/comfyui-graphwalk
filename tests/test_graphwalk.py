@@ -192,6 +192,10 @@ class Switches(unittest.TestCase):
         g = self.switch_graph("Any Switch (rgthree)", any_01=None, any_02=ref(5), any_03=ref(2))
         self.assertEqual(extract(g)["positive"], "a green pear on a plate")
 
+    def test_any_switch_goes_by_slot_number_not_key_order(self):
+        g = self.switch_graph("Any Switch (rgthree)", any_03=ref(2), any_02=ref(5))
+        self.assertEqual(extract(g)["positive"], "a green pear on a plate")
+
     def test_any_switch_on_model_edge(self):  # finding 13
         g = basic_graph(model_ref=ref(6))
         g["6"] = node("Any Switch (rgthree)", any_01=ref(1))
