@@ -135,7 +135,9 @@ the image dimensions are stored. Failures are logged as warnings (file path and 
 no prompt text) through IIB's logger.
 
 Coverage is broad but not exhaustive — workflows using node types not listed below may
-produce incomplete results.
+produce incomplete results. The rule is *better empty than wrong*: where the graph needs
+a rule the plugin does not know (an unknown switch, a size it cannot read), the value
+stays unresolved instead of being guessed.
 
 ## Using the core without IIB
 
@@ -159,6 +161,12 @@ if info:
     print(info["positive"], info["model_name"], info["loras"])
     print(graphwalk.format_a1111(info))
 ```
+
+From the command line, `python3 graphwalk.py <image.png | prompt.json>` prints the
+A1111 text of an image (PNG `prompt` chunk, read without Pillow) or of a prompt JSON file.
+With `--trace` it prints the path taken for every field instead — node id, class and
+input name of each step, the branch a switch selected, the values read — which is what
+a bug report needs. `trace_from_prompt(prompt)` returns the same as `(info, lines)`.
 
 `extract_from_prompt(prompt)` returns a dict with `positive`, `negative`, `seed`,
 `steps`, `cfg`, `sampler_name`, `scheduler`, `model_name`, `width`, `height` and
@@ -216,53 +224,68 @@ Followed recursively from a text input until a string is produced.
 | `RegexReplace` | follows upstream text, then applies the substitution; pattern, replacement, count and flags may be wired from other nodes |
 | Nodes in `TEXT_PASSTHROUGH` | output one of their own text inputs unchanged; the map (class → input name) at the top of [graphwalk.py](graphwalk.py) names which input is read |
 | Switches | see [Switches](#switches) |
-| Display passthrough — `easy showAnything` · `ShowText\|pysssss` · `Display Any (rgthree)` / … | reads the cached `text`/`value`/`string` widget, else follows the passthrough input |
+| Display passthrough — `easy showAnything` · `ShowText\|pysssss` · `Display Any (rgthree)` / … | follows the passthrough input; the cached `text`/`value`/`string` widget is the fallback when the source cannot be resolved |
 | Primitive / `ShowText` / `Note` / `TriggerWord Toggle` / … | any node storing a scalar in `value`, `text`, `string`, `populated_text`, or `trigger_words` |
 
 ### Conditioning
 
 - **Passthrough** (continue upstream): `Reroute` · `ConditioningSetTimestepRange` ·
   `ConditioningSetArea` · `ConditioningSetAreaPercentage` · `ConditioningSetMask` ·
-  `unCLIPConditioning`
-- **Merge** (both inputs joined): `ConditioningCombine` · `ConditioningConcat` ·
+  `unCLIPConditioning`. An unknown node with a `conditioning` input is followed the same
+  way (marked "generic" in the trace); one with several conditioning inputs is not.
+- **Merge** (all inputs joined): `ConditioningCombine` · `ConditioningConcat` ·
   `ConditioningAverage`
-- **Slot-aware passthrough** (output slot 0 → `positive` input, slot 1 → `negative` input):
-  `ControlNetApplyAdvanced` · `ControlNetApplySD3`; the deprecated single-input
-  `ControlNetApply` follows its `conditioning` input
+- **Slot-aware passthrough**, one rule for every node that has both a `positive` and a
+  `negative` input (`ControlNetApplyAdvanced`, `ControlNetApplySD3`,
+  `InstructPix2PixConditioning`, `WanImageToVideo`, …): output slot 0 comes from
+  `positive`, slot 1 from `negative`, any later slot is not conditioning. The deprecated
+  single-input `ControlNetApply` follows its `conditioning` input
 - **`ConditioningZeroOut`** yields no text: an empty negative prompt stays empty
   instead of repeating the positive one
 
 ### Switches
 
-Followed on text, conditioning, model, latent and scalar edges:
+Followed on text, conditioning, model, latent and scalar edges. Only the switches in the
+`SWITCHES` table of [graphwalk.py](graphwalk.py) are known; a node that merely has
+"Switch" in its name is not guessed at (its inputs stay unresolved).
 
-- core `ComfySwitchNode` / `ComfySoftSwitchNode` (`switch`, `on_true`, `on_false`; `switch`
-  may be wired from a scalar node). The soft variant uses the connected branch when only
-  one is connected; the hard one yields nothing without the selected branch.
-- rgthree `Any Switch`: the first connected `any_*` input.
-- any other node whose class name contains `Switch` (e.g. `ImpactSwitch`,
-  `ImpactInversedSwitch`): the branch chosen by `select` (`input1`, `input2`, …), else
-  the first connected input.
+| Node | Rule |
+|---|---|
+| core `ComfySwitchNode` / `ComfySoftSwitchNode` | `on_true` / `on_false` by `switch` (a literal, or wired from a scalar node). The soft variant uses the connected branch when only one is connected. A flag that cannot be resolved selects nothing |
+| rgthree `Any Switch` | the first connected `any_*` input, by number |
+| Impact `ImpactSwitch`, `LatentSwitch` | `input<select>` (`select` literal or wired). No such input (or no `select`) gives nothing, as the node itself outputs nothing then |
+| Impact `ImpactInversedSwitch` | one `input`, output slot `select - 1` carries it, the other outputs nothing |
+| Easy-Use `easy anythingIndexSwitch` / `textIndexSwitch` / `conditioningIndexSwitch` | `value<index>` / `text<index>` / `cond<index>`, index from 0 |
+| Easy-Use `easy textSwitch` | `text<input>` |
+| Easy-Use `easy anythingInversedSwitch` | one `in`, output slot `index` carries it |
 
 ### Sampler scalars — seed / steps / CFG / sampler / scheduler
 
 Read from the sampler's own widgets, or resolved along graph edges when wired from
 upstream nodes. The resolver carries the *name* of the field being resolved so it can:
 
-- follow [switch](#switches) nodes (selected branch) and Primitive / `Seed (rgthree)` / `easy int`
-  / `easy float` scalar sources;
-- match a widget on the target node that is **named like the requested field** — this
-  handles aggregator / pipe nodes such as `Input Parameters (Image Saver)`, where
-  `KSampler.steps` points at an output slot but the value lives in a widget literally
-  called `steps` (likewise `cfg`, `seed`, …);
-- read the cached widget of a display passthrough (`easy showAnything`, `ShowText`, …),
-  e.g. a `sampler_name` routed through a preview node.
+- follow [switch](#switches) nodes (selected branch), `Reroute` and `Any to String
+  (Image Saver)`, and read plain value nodes (`Primitive*`, `easy int` / `easy float`,
+  …) from their `value` / `int` / `float` / `number` / `result` widget. A `seed` widget
+  (`Seed (rgthree)`) answers only a request for the seed, so `steps` never comes from a
+  seed; string fields (sampler, scheduler, file names) read only `value`;
+- map the output slot of a multi-output node to the widget behind it (`OUTPUT_WIDGETS`):
+  `Input Parameters (Image Saver)` (seed, steps, cfg, sampler, scheduler, denoise), the
+  Image Saver sampler / scheduler selectors and literals;
+- as the rule of last resort, match a widget named like the requested field on an
+  aggregator / pipe node;
+- resolve display nodes (`easy showAnything`, `ShowText`, `PreviewAny`, …) by following
+  their input edge. Their cached widget is a leftover of an earlier run and goes stale
+  when the source is edited, so it is read only when the source cannot be resolved.
 
 ### Model
 
-- **Checkpoint loaders** (terminus, returns `ckpt_name` / `unet_name` / `model_name`,
-  literal or wired from another node): `CheckpointLoaderSimple` · `CheckpointLoader` ·
-  `unCLIPCheckpointLoader` · `Checkpoint Loader`
+- **Loaders** (terminus; the `MODEL_LOADERS` table names the widget, `ckpt_name` or
+  `unet_name`, literal or wired from another node): `CheckpointLoaderSimple` ·
+  `CheckpointLoader` · `unCLIPCheckpointLoader` · `ImageOnlyCheckpointLoader` · `UNETLoader` ·
+  the GGUF loaders · the LoraManager and Image Saver loaders and others. A node of an
+  unknown class at the end of the chain (no `model` input) is read through `ckpt_name` /
+  `unet_name`; other widgets such as `model_name` (upscalers, detectors) do not end it.
 - **Passthrough** (continue upstream): **any** node carrying a `model` edge is followed
   generically — no whitelist. This covers LoRA loaders, model patchers
   (`CLIPSetLastLayer`, `ModelSamplingDiscrete`, `FreeU`, `RescaleCFG`,
@@ -310,29 +333,36 @@ Width/height read from `EmptyLatentImage` · `EmptySD3LatentImage` ·
 `EmptyHunyuanLatentVideo` (direct or Primitive-referenced scalars).
 
 When width/height are wired from a size-picker node without `width`/`height` widgets,
-the size is read from the first `W×H` / `WxH` in one of its string widgets (e.g. a
-preset label `Portrait 2:3 · 1152×1728 · 1.9 MP`); without one, a widget whose name
-contains `width` / `height` (e.g. `custom_width`) is used. Pickers that compute the
-size from aspect ratio and megapixels are not covered.
+the size is read from the first `W×H` / `WxH` in one of its literal string widgets (e.g.
+a preset label `Portrait 2:3 · 1152×1728 · 1.9 MP`, width first); without one, a widget
+whose name contains `width` / `height` (e.g. `custom_width`) is used. This applies only
+to the node at the end of the `width` / `height` edge of an empty-latent node, never to
+other fields. Pickers that compute the size from aspect ratio and megapixels are not
+covered.
 
 `Reroute` and the [switch nodes](#switches) are followed automatically.
 
 ## Adding a node
 
-Most gaps are fixed by adding a class name to the right set near the top of
-[graphwalk.py](graphwalk.py) — no new logic needed if the node merely passes a signal through:
+The walker is generic; what a node does is data in the tables near the top of
+[graphwalk.py](graphwalk.py). Most gaps are fixed by adding a class name to the right one:
 
 - pure model passthrough (e.g. another LoRA loader or a merge) → already handled (any
   `model` / `model1` / `model2` edge is followed generically); no change needed
-- conditioning passthrough / merge → `COND_PASSTHROUGH` / `COND_COMBINE`
+- a model loader → `MODEL_LOADERS` (class → file-name widget)
+- conditioning passthrough / merge → `COND_PASSTHROUGH` / `COND_COMBINE`; a node with
+  `positive` and `negative` inputs needs nothing
 - another CLIP text encoder → `TEXT_ENCODE_CLASSES`
+- a switch → `SWITCHES` (a `Switch` entry says how it picks its input)
+- a multi-output node whose widgets are the values → `OUTPUT_WIDGETS` (slot → widget)
+- a node that passes a value through unchanged → `TEXT_PASSTHROUGH` (text input name) or
+  `VALUE_PASSTHROUGH`
+- a display node with a cached widget → `SHOW_PASSTHROUGH`
 - a sampler variant → `SAMPLER_CLASSES`
 - an empty-latent variant → `LATENT_SIZE_CLASSES`
-- a node that outputs one of its text inputs unchanged → `TEXT_PASSTHROUGH`
-  (class → input name)
 
 Nodes that transform text (concatenate, regex, wildcards, …) need a dedicated branch in
-`resolve_text`. PRs welcome.
+`Walker._text_of`. PRs welcome.
 
 ## Tests
 
@@ -350,7 +380,9 @@ docker run --rm -v "$PWD":/app/plugins/comfyui_graphwalk:ro -w /app <iib-image> 
     python -m unittest discover -s /app/plugins/comfyui_graphwalk/tests
 ```
 
-All graphs and prompts in the tests are synthetic. To check that a change leaves the
+All graphs and prompts in the tests are synthetic: `test_graphwalk.py` the behaviour of the
+whole extraction, `test_rules.py` one test per rule table and per heuristic that used to
+guess, `test_trace.py` the trace mode and the command line. To check that a change leaves the
 output for your own images unchanged, compare two versions of the core with
 `tools/compare_versions.py` (Pillow required). It prints only counts, file paths and
 the names of differing fields, never prompt text:
