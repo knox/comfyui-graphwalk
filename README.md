@@ -609,8 +609,9 @@ Core tests, standard library only:
 python3 -m unittest discover tests
 ```
 
-`tests/test_main.py` tests the IIB adapter and is skipped without IIB. Run it inside
-an IIB checkout or container, e.g. with the Docker image of IIB:
+CI runs this on Python 3.10 to 3.13 (`.github/workflows/tests.yml`). `tests/test_main.py`
+tests the IIB adapter; it needs IIB, so it is skipped there and in any other environment
+without IIB. Run it inside an IIB checkout or container, e.g. with the Docker image of IIB:
 
 ```bash
 docker run --rm -v "$PWD":/app/plugins/comfyui_graphwalk:ro -w /app <iib-image> \
