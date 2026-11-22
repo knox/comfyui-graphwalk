@@ -26,7 +26,7 @@ class Baseline(unittest.TestCase):
             graphwalk.format_a1111(extract(g)),
             f"{POSITIVE} <lora:pastel_v1.5:0.8>\n"
             f"Negative prompt: {NEGATIVE}\n"
-            "Steps: 20, Sampler: euler normal, CFG scale: 7.5, Seed: 123, Size: 512x768, Model: apple_model",
+            "Steps: 20, Sampler: euler, Schedule type: normal, CFG scale: 7.5, Seed: 123, Size: 512x768, Model: apple_model",
         )
 
     def test_info_keys_and_values(self):
@@ -318,9 +318,17 @@ class FormatParts(unittest.TestCase):
         info = extract(basic_graph())
         self.assertEqual(
             graphwalk.a1111_params(info),
-            [("Steps", "20"), ("Sampler", "euler normal"), ("CFG scale", "7.5"), ("Seed", "123"),
+            [("Steps", "20"), ("Sampler", "euler"), ("Schedule type", "normal"), ("CFG scale", "7.5"), ("Seed", "123"),
              ("Size", "512x768"), ("Model", "apple_model")],
         )
+
+    def test_schedule_type_follows_sampler_and_needs_it(self):
+        self.assertEqual(
+            graphwalk.a1111_params({"sampler_name": "dpmpp_2m", "scheduler": "karras"}),
+            [("Sampler", "dpmpp_2m"), ("Schedule type", "karras")],
+        )
+        self.assertEqual(graphwalk.a1111_params({"sampler_name": "euler"}), [("Sampler", "euler")])
+        self.assertEqual(graphwalk.a1111_params({"scheduler": "karras"}), [])
 
     def test_no_params_no_line(self):
         self.assertEqual(graphwalk.format_a1111({"positive": "a red apple"}), "a red apple")

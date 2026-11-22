@@ -1454,15 +1454,15 @@ def a1111_prompt_text(info: dict, lora_separator: str = " ") -> str:
 
 def a1111_params(info: dict):
     """The A1111 parameters line as ordered ``(key, value)`` string pairs (the
-    keys ``Steps``, ``Sampler``, ``CFG scale``, ``Seed``, ``Size``, ``Model``)."""
+    keys ``Steps``, ``Sampler``, ``Schedule type`` (only with a sampler), ``CFG scale``,
+    ``Seed``, ``Size``, ``Model``)."""
     parts = []
     if info.get("steps") is not None:
         parts.append(("Steps", f"{info['steps']}"))
     if info.get("sampler_name"):
-        samp = info["sampler_name"]
+        parts.append(("Sampler", f"{info['sampler_name']}"))
         if info.get("scheduler"):
-            samp = f"{samp} {info['scheduler']}"
-        parts.append(("Sampler", f"{samp}"))
+            parts.append(("Schedule type", f"{info['scheduler']}"))
     if info.get("cfg") is not None:
         parts.append(("CFG scale", f"{info['cfg']}"))
     if info.get("seed") is not None:

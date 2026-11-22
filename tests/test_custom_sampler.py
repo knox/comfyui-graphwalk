@@ -296,7 +296,7 @@ class NewerModelGraph(unittest.TestCase):
         self.assertEqual(
             graphwalk.format_a1111(info),
             f"{POSITIVE} <lora:pastel:0.7>\n"
-            "Steps: 20, Sampler: euler flux2, Seed: 1234, Size: 1024x1536, Model: apple_flux",
+            "Steps: 20, Sampler: euler, Schedule type: flux2, Seed: 1234, Size: 1024x1536, Model: apple_flux",
         )
 
     def test_model_patchers_pass_the_model_on(self):

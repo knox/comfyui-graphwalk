@@ -80,12 +80,18 @@ class NormalImages(AdapterCase):
         self.assertEqual(result.params.meta["Size-1"], "512")
         self.assertEqual(result.params.meta["Source Identifier"], "ComfyUI")
 
+    def test_scheduler_is_its_own_meta_key(self):
+        result = self.parse(self.png(basic_graph()))
+        self.assertEqual(result.params.meta["Sampler"], "euler")
+        self.assertEqual(result.params.meta["Schedule type"], "normal")
+        self.assertEqual(adapter.Main.extra_convert_to_tag_meta_keys, [])
+
     def test_raw_info_is_unchanged(self):
         result = self.parse(self.png(basic_graph()))
         self.assertEqual(
             result.raw_info,
             f"{POSITIVE}\nNegative prompt: {NEGATIVE}\n"
-            "Steps: 20, Sampler: euler normal, CFG scale: 7.5, Seed: 123, Size: 512x768, Model: apple_model"
+            "Steps: 20, Sampler: euler, Schedule type: normal, CFG scale: 7.5, Seed: 123, Size: 512x768, Model: apple_model"
             ", Source Identifier: ComfyUI",
         )
 

@@ -118,10 +118,11 @@ made the saved picture (from the save node back to the first pass, see
 backwards from it — through LoRA loaders, Reroutes, conditioning merges
 and other intermediates — until it reaches the source values (checkpoint name, CLIP
 encoders, latent size, seed/steps/CFG scalars). These are assembled into an A1111-style
-`parameters` string, so tags, search and "Send to txt2img" keep working. IIB's
+`parameters` string, so tags, search and "Send to txt2img" keep working. The scheduler
+is its own key, as in A1111 (`Sampler: euler, Schedule type: simple`). IIB's
 `parse_generation_parameters` turns the prompt part into prompt tags (given a comma
 before the LoRA tags, so the last phrase of the prompt stays a tag of its own); the metadata
-(`Steps`, `Sampler`, `CFG scale`, `Seed`, `Size`, `Model`, `Source Identifier`) and the
+(`Steps`, `Sampler`, `Schedule type`, `CFG scale`, `Seed`, `Size`, `Model`, `Source Identifier`) and the
 LoRA list come straight from the extracted fields, so they are complete even when only
 a few parameters could be resolved and also cover LoRAs IIB's own `<lora:…>` pattern
 cannot read (negative weights, names with characters such as `+` or `'`).
@@ -177,8 +178,8 @@ whose walk fails is reported as unresolved without affecting the others; input t
 not a prompt dict gives `None`. `format_a1111(info)` turns it into an A1111-style
 `parameters` string, LoRAs appended to the positive prompt as `<lora:name:weight>`
 tags. The parts it is made of are available too: `a1111_prompt_text(info)`,
-`a1111_params(info)` (ordered `(key, value)` strings), `lora_entries(info)` and
-`model_basename(name)`. Import `graphwalk`, not `main`: `main.py` needs IIB.
+`a1111_params(info)` (ordered `(key, value)` strings, the scheduler as `Schedule type`),
+`lora_entries(info)` and `model_basename(name)`. Import `graphwalk`, not `main`: `main.py` needs IIB.
 
 ## Supported nodes
 
