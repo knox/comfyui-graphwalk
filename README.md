@@ -120,8 +120,9 @@ and other intermediates — until it reaches the source values (checkpoint name,
 encoders, latent size, seed/steps/CFG scalars). These are assembled into an A1111-style
 `parameters` string, so tags, search and "Send to txt2img" keep working. The scheduler
 is its own key, as in A1111 (`Sampler: euler, Schedule type: simple`). IIB's
-`parse_generation_parameters` turns the prompt part into prompt tags (given a comma
-before the LoRA tags, so the last phrase of the prompt stays a tag of its own); the metadata
+`parse_prompt` turns the prompt text into prompt tags (given a comma before the LoRA
+tags, so the last phrase of the prompt stays a tag of its own; IIB versions without
+`parse_prompt` get the same tags through `parse_generation_parameters`); the metadata
 (`Steps`, `Sampler`, `Schedule type`, `CFG scale`, `Seed`, `Size`, `Model`, `Source Identifier`) and the
 LoRA list come straight from the extracted fields, so they are complete even when only
 a few parameters could be resolved and also cover LoRAs IIB's own `<lora:…>` pattern

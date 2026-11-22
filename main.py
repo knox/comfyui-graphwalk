@@ -7,8 +7,7 @@ so returns wrong values on non-trivial workflows. The graph logic lives in
 ``graphwalk.py`` (standard library only, usable without IIB); this module is the
 IIB adapter: it reads the ComfyUI ``prompt`` chunk from the image, lets the core
 build an A1111-style ``parameters`` string, takes the prompt tags from IIB's
-``parse_generation_parameters`` and builds meta and LoRA list from the extracted
-fields directly. Images the core cannot handle (no known sampler, errors) are
+``parse_prompt`` and builds meta and LoRA list from the extracted fields directly. Images the core cannot handle (no known sampler, errors) are
 handed to IIB's built-in ComfyUIParser.
 
 ``scripts/iib/parsers/index.py`` prepends plugin instances to the parser list, so
@@ -31,6 +30,13 @@ from scripts.iib.tool import (
     parse_generation_parameters,
     find,
 )
+
+# ``parse_prompt`` (the prompt-tag half of ``parse_generation_parameters``) is not
+# available in old IIB versions; without it the tags come from the text round-trip.
+try:
+    from scripts.iib.tool import parse_prompt, unique_by
+except ImportError:
+    parse_prompt = unique_by = None
 
 try:
     from scripts.iib.logger import logger
@@ -157,7 +163,8 @@ def _get_prompt_dict(img):
 _RE_IMAGESIZE = re.compile(r"^(\d+)x(\d+)$")
 # Characters IIB's parse_prompt removes before it looks for tags (re_parens).
 _RE_PARENS = re.compile(r"[\\/\[\](){}]+")
-# Three ``key: value`` pairs make IIB treat a line as the parameters line.
+# Three ``key: value`` pairs make IIB treat a line as the parameters line (only
+# needed by the text round-trip used when IIB has no ``parse_prompt``).
 _PARAMS_SENTINEL = "Steps: 0, Sampler: none, Seed: 0"
 
 
@@ -182,6 +189,28 @@ def _meta_from_info(info: dict) -> dict:
 def _iib_lora_name(stem: str) -> str:
     """A LoRA name the way IIB's parse_prompt turns it into a tag name."""
     return _RE_PARENS.sub("", stem.replace("-", " ").replace("_", " "))
+
+
+def _prompt_tags(info: dict) -> dict:
+    """
+    ``pos_prompt``, ``lora`` and ``lyco`` as ``parse_generation_parameters`` yields
+    them for the positive prompt: IIB's ``parse_prompt`` on the prompt text, then
+    the same de-duplication. IIB splits tags at commas only, so the LoRA tags get a
+    comma in front: without it the last phrase and the first ``<lora:…>`` tag
+    would form one tag, and the phrase be lost. Old IIB without ``parse_prompt``
+    gets the same result through ``parse_generation_parameters`` and a stand-in
+    parameters line.
+    """
+    text = _core.a1111_prompt_text(info | {"negative": ""}, lora_separator=", ")
+    if parse_prompt is None or unique_by is None:
+        params = parse_generation_parameters(f"{text}\n{_PARAMS_SENTINEL}" if text else _PARAMS_SENTINEL)
+        return {key: params.get(key, []) for key in ("pos_prompt", "lora", "lyco")}
+    parsed = parse_prompt("\n".join(line.strip() for line in text.split("\n")))
+    return {
+        "pos_prompt": unique_by(parsed["pos_prompt"]),
+        "lora": unique_by(parsed["lora"], lambda x: x["name"].lower()),
+        "lyco": unique_by(parsed["lyco"], lambda x: x["name"].lower()),
+    }
 
 
 def _merge_loras(info: dict, text_loras) -> list:
@@ -238,17 +267,13 @@ class Main:
         # "Source Identifier" must appear on the metadata line to match ComfyUIParser behaviour.
         a1111 = (a1111 + ", Source Identifier: ComfyUI") if a1111 else "Source Identifier: ComfyUI"
 
-        # IIB only takes the last line for the parameters when it holds three
-        # ``key: value`` pairs, which a graph with few resolved fields does not.
-        # So IIB parses the prompt part with a stand-in parameters line (for the
-        # prompt tags) and meta and LoRAs come from the extracted fields.
-        # IIB splits prompt tags at commas only: without the comma the last phrase
-        # and the first <lora:…> tag would form one tag, and the phrase be lost.
-        prompt_text = _core.a1111_prompt_text(info, lora_separator=", ")
-        params = parse_generation_parameters(f"{prompt_text}\n{_PARAMS_SENTINEL}" if prompt_text else _PARAMS_SENTINEL)
+        # The parameters line may hold fewer than the three ``key: value`` pairs IIB
+        # needs to recognise it, so prompt tags come from IIB's ``parse_prompt`` on
+        # the prompt text and meta and LoRAs from the extracted fields.
+        params = _prompt_tags(info)
         meta = _meta_from_info(info)
-        params["meta"] = meta
-        params["lora"] = _merge_loras(info, params.get("lora"))
+        params = {"meta": meta, **params}
+        params["lora"] = _merge_loras(info, params["lora"])
         return ImageGenerationInfo(
             a1111,
             ImageGenerationParams(

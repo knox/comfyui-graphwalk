@@ -19,6 +19,7 @@ sys.path.insert(0, str(HERE))
 
 try:
     from PIL import Image
+    from PIL.PngImagePlugin import PngInfo
     from scripts.iib.parsers.model import ImageGenerationInfo
     from scripts.iib.tool import parse_generation_parameters
 except Exception as exc:  # noqa: BLE001 - IIB not importable here
@@ -46,8 +47,6 @@ class AdapterCase(unittest.TestCase):
         self.plugin = adapter.Main()
 
     def png(self, graph, name="a.png"):
-        from PIL.PngImagePlugin import PngInfo
-
         info = PngInfo()
         info.add_text("prompt", json.dumps(graph))
         info.add_text("workflow", "{}")
@@ -117,6 +116,101 @@ class NormalImages(AdapterCase):
         g["2"]["inputs"]["text"] = "hair: red, eyes: blue, skin: pale"
         result = self.parse(self.png(g))
         self.assertEqual(result.params.pos_prompt, ["hair", "eyes", "skin"])
+
+
+def old_round_trip(info):
+    """What the adapter yielded before ``parse_prompt`` was used directly: IIB's text
+    round-trip with a stand-in parameters line. The reference for ``PromptTags``."""
+    text = adapter._core.a1111_prompt_text(info, lora_separator=", ")
+    params = parse_generation_parameters(f"{text}\nSteps: 0, Sampler: none, Seed: 0" if text else "Steps: 0, Sampler: none, Seed: 0")
+    return {
+        "pos_prompt": params["pos_prompt"],
+        "lora": adapter._merge_loras(info, params["lora"]),
+        "lyco": params["lyco"],
+    }
+
+
+PROMPTS = [
+    POSITIVE,
+    "a red apple, on a wooden table",
+    "hair: red, eyes: blue, skin: pale",
+    "(a red apple:1.2), [on a wooden table], {soft} light, (a red apple:1.2)",
+    "a red apple\nsecond line, third phrase\n  indented line , last",
+    "a red apple BREAK on a wooden table BREAK soft light",
+    "a red apple，on a wooden table_with-dashes，， ,",
+    "A Red Apple, a red apple, A RED APPLE",
+    "a red apple <lyco:glaze_v2:0.6>, on a table <lora:typed_one:0.5>, <lora:Typed_One:0.9>",
+    "<lora:only_a_tag:1> a red apple",
+    "embedding:easy_neg, a red apple, ext: more text",
+    "   ",
+    "",
+]
+
+
+def tag_info(positive, negative="blurry", loras=()):
+    return {"positive": positive, "negative": negative, "loras": list(loras)}
+
+
+class PromptTags(unittest.TestCase):
+    LORA_SETS = [
+        [],
+        [("styles/pastel_v1.5.safetensors", 0.8)],
+        [("slider+plus_v2.safetensors", -0.5), ("it's-fine.safetensors", 0.75), ("Pastel_V1.5", 1)],
+    ]
+
+    def cases(self):
+        for positive in PROMPTS:
+            for loras in self.LORA_SETS:
+                for negative in ("", "blurry, low quality\nsecond negative line"):
+                    yield tag_info(positive, negative, loras)
+
+    def test_parse_prompt_gives_the_old_round_trip_result(self):
+        for info in self.cases():
+            new = adapter._prompt_tags(info)
+            new["lora"] = adapter._merge_loras(info, new["lora"])
+            self.assertEqual(new, old_round_trip(info), info)
+
+    def test_old_iib_without_parse_prompt_gives_the_same_result(self):
+        with mock.patch.object(adapter, "parse_prompt", None):
+            for info in self.cases():
+                new = adapter._prompt_tags(info)
+                new["lora"] = adapter._merge_loras(info, new["lora"])
+                self.assertEqual(new, old_round_trip(info), info)
+
+    def test_fixed_expectations(self):
+        info = tag_info("(a red apple:1.2), on a wooden table_top, A Red Apple", "blurry",
+                        [("styles/pastel_v1.5.safetensors", 0.8)])
+        self.assertEqual(adapter._prompt_tags(info), {
+            "pos_prompt": ["a red apple", "on a wooden table top"],
+            "lora": [{"name": "pastel v1.5", "value": 0.8}],
+            "lyco": [],
+        })
+
+    def test_negative_prompt_never_becomes_a_tag(self):
+        tags = adapter._prompt_tags(tag_info(POSITIVE, "blurry, ugly"))
+        self.assertEqual(tags["pos_prompt"], [POSITIVE])
+
+    def test_whole_image_matches_the_old_round_trip(self):
+        for loras in self.LORA_SETS:
+            g = basic_graph()
+            g["2"]["inputs"]["text"] = "a red apple, (on a wooden table:1.1), soft light"
+            if loras:
+                g["6"] = node("LoraLoader", model=ref(1), clip=ref(1, 1), lora_name=loras[0][0],
+                              strength_model=loras[0][1], strength_clip=loras[0][1])
+                g["9"]["inputs"]["model"] = ref(6)
+            info = adapter.extract_from_prompt(g)
+            tmp = tempfile.TemporaryDirectory()
+            self.addCleanup(tmp.cleanup)
+            png = PngInfo()
+            png.add_text("prompt", json.dumps(g))
+            path = Path(tmp.name) / "a.png"
+            Image.new("RGB", (8, 12)).save(path, pnginfo=png)
+            plugin = adapter.Main()
+            with Image.open(path) as img:
+                result = plugin.parse(img, str(path))
+            old = old_round_trip(info)
+            self.assertEqual(result.params.pos_prompt, old["pos_prompt"])
+            self.assertEqual(result.params.extra, {"lora": old["lora"], "lyco": old["lyco"]})
 
 
 class Loras(AdapterCase):
