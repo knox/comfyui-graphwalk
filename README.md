@@ -1,8 +1,10 @@
 # ComfyUI Graph-Walk — IIB parser plugin
 
 A drop-in parser plugin for
-[sd-webui-infinite-image-browsing](https://github.com/zanllp/sd-webui-infinite-image-browsing)
-(IIB) that correctly reads generation metadata from **ComfyUI** images.
+[infinite-image-browsing](https://github.com/zanllp/infinite-image-browsing) (IIB) that
+reads generation metadata from **ComfyUI** images by walking the workflow graph: from
+the node that saved the image back to its sampler, and from there to the nodes that
+actually supplied each value.
 
 ## Why
 
@@ -102,7 +104,7 @@ and with it its custom tags. Do not use this on them.
 Stop IIB, delete the DB, restart. Re-scans everything; **custom tags and likes are lost**.
 
 ```bash
-rm ~/sd-webui-infinite-image-browsing/iib.db
+rm ~/infinite-image-browsing/iib.db
 ```
 
 ### Not recommended

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-ComfyUI Graph-Walk parser plugin for sd-webui-infinite-image-browsing (IIB).
+ComfyUI Graph-Walk parser plugin for infinite-image-browsing (IIB).
 
 Replaces IIB's built-in ComfyUIParser, which only reads the raw KSampler inputs and
 so returns wrong values on non-trivial workflows. The graph logic lives in
