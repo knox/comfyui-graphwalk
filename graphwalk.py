@@ -1562,7 +1562,7 @@ def _parse_settings(line: str) -> dict:
         if pos < end and line[pos] in '{["':
             try:
                 value, after = _JSON.raw_decode(line, pos)
-            except ValueError:
+            except (ValueError, RecursionError):  # deep nesting: RecursionError up to 3.11
                 after = None
             tail = _RE_VALUE_END.match(line, after) if after is not None else None
             if tail:
@@ -1583,7 +1583,7 @@ def _json_value(value):
     if isinstance(value, str):
         try:
             return json.loads(value)
-        except ValueError:
+        except (ValueError, RecursionError):
             return None
     return value
 
