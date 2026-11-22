@@ -86,7 +86,7 @@ class Trace(unittest.TestCase):
         self.assertEqual(graphwalk.trace_from_prompt(g)[0], graphwalk.extract_from_prompt(g))
 
     def test_no_sampler_gives_no_info(self):
-        self.assertEqual(graphwalk.trace_from_prompt({"1": node("CLIPTextEncode", text="x")}), (None, []))
+        self.assertIsNone(graphwalk.trace_from_prompt({"1": node("CLIPTextEncode", text="x")})[0])
 
 
 class CommandLine(unittest.TestCase):

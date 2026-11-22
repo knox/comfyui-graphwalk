@@ -2,9 +2,11 @@
 """
 ComfyUI Graph-Walk core: generation parameters from a ComfyUI ``prompt`` graph.
 
-Walks the ComfyUI API ``prompt`` graph backwards from the sampler, resolving the
-real values through Reroute / LoRA-loader / conditioning / switch chains, and
-formats them as an A1111-style ``parameters`` string.
+Finds the sampler a picture was made by (from the output node back through decode
+and upscale to the first pass, see ``_find_output_sampler``), walks the ComfyUI API
+``prompt`` graph backwards from it, resolving the real values through Reroute /
+LoRA-loader / conditioning / switch chains, and formats them as an A1111-style
+``parameters`` string.
 
 Standard library only, no IIB or PIL: the caller reads the ``prompt`` chunk from
 the image and passes the parsed dict. The IIB plugin (``main.py``) is a thin
@@ -22,10 +24,10 @@ prints the A1111 result, or with ``--trace`` the path taken for every field.
 How it is built: one walker (``Walker``) follows an edge ``[node_id, slot]``
 backwards through the nodes that merely pass a signal on, and stops at the first
 node that really is the source. What "passes a signal on" means is decided per
-signal type (CONDITIONING, MODEL, LATENT, STRING, scalar) by ``Walker._next_*``
-and the rule tables below. Consumers (``cond_text``, ``text``, ``scalar``,
-``model_name``, ``loras``, ``latent_size``) read the source node they arrive at.
-The walker does not know the sampler: any edge can be resolved.
+signal type (CONDITIONING, MODEL, LATENT, STRING, scalar, IMAGE) by ``Walker._next_*`` and the rule tables
+below. Consumers (``cond_text``, ``text``, ``scalar``, ``model_name``, ``loras``,
+``latent_size``) read the source node they arrive at. The walker does not know the
+sampler: any edge can be resolved.
 
 Principle: better empty than wrong. Where a rule is not known, the value stays
 unresolved instead of being guessed.
@@ -65,11 +67,15 @@ LATENT = "LATENT"
 TEXT = "STRING"
 SCALAR = "SCALAR"  # seed, steps, cfg, names, flags, sizes: a literal widget value
 LORA_STACK = "LORA_STACK"  # LoraManager's stack of LoRAs, passed from Stacker to Stacker
+IMAGE = "IMAGE"  # a picture on its way back from an output node through the decode to the first latent
 
 # ---------------------------------------------------------------------------
 # Rule tables: which node classes do what
 # ---------------------------------------------------------------------------
 
+# KSampler-like samplers: ``model``, ``positive``, ``negative``, ``latent_image``, a seed and
+# ``steps`` as widgets. Known classes; any other node with that signature counts as well
+# (see ``_sampler_kind``).
 SAMPLER_CLASSES = {
     "KSampler",
     "KSamplerAdvanced",
@@ -79,6 +85,45 @@ SAMPLER_CLASSES = {
     "Tiled KSampler",
     "BNK_Unsampler",
 }
+# The signature: all of these inputs, plus a seed (``seed`` or ``noise_seed``).
+SAMPLER_SIGNATURE = frozenset({"model", "positive", "negative", "latent_image", "steps"})
+
+# --- Output nodes (where the search for the sampler starts) ----------------
+
+# Nodes that save pictures: class -> the input that takes them. Any other node with an
+# ``images`` input that nothing else uses is an output node as well (a video combiner, say).
+SAVE_CLASSES = {
+    # core
+    "SaveImage": "images",
+    "SaveImageAdvanced": "images",
+    "SaveAnimatedWEBP": "images",
+    "SaveAnimatedPNG": "images",
+    "SaveWEBM": "images",
+    "SaveVideo": "video",
+    # ComfyUI-Image-Saver
+    "Image Saver": "images",
+    "Image Saver Simple": "images",
+    "Image Saver (From Pipe)": "images",
+    # ComfyUI-Lora-Manager, comfyui-kjnodes, ComfyUI-Easy-Use, NamingSave
+    "Save Image (LoraManager)": "images",
+    "SaveImageKJ": "images",
+    "SaveImageWithAlpha": "images",
+    "easy imageSave": "images",
+    "SaveImageNaming": "images",
+}
+# Nodes that only show pictures. IIB indexes saved images, so these are used only when
+# no save node leads to a sampler.
+PREVIEW_CLASSES = {
+    "PreviewImage",
+    "PreviewAnimation",  # comfyui-kjnodes
+    "PreviewBridge",  # Impact Pack
+    "ImageSender",  # Impact Pack
+    "SaveImageWebsocket",  # saves nothing
+}
+# Inputs a node on the picture's way back takes its picture (or latent) from; the first
+# one that is connected is followed. VAEDecode(Tiled) takes ``samples``, VAEEncode
+# ``pixels``, upscalers ``image``, CreateVideo ``images``, GetVideoComponents ``video``.
+IMAGE_INPUTS = ("images", "image", "pixels", "video")
 
 # --- CONDITIONING ----------------------------------------------------------
 
@@ -360,6 +405,21 @@ def _is_size_source(class_type: str, inputs: dict) -> bool:
     )
 
 
+def _sampler_kind(class_type: str, inputs: dict):
+    """``"ksampler"`` or None: a sampler by class where it is known, else by the inputs the node has."""
+    if class_type in SAMPLER_CLASSES:
+        return "ksampler"
+    keys = inputs.keys()
+    if SAMPLER_SIGNATURE <= keys and ("seed" in keys or "noise_seed" in keys):
+        return "ksampler"
+    return None
+
+
+def _id_key(node_id: str):
+    """Sort key for node ids by number (``"9"`` before ``"12"``; ``"5:3"``, a node in a subgraph, by its parts)."""
+    return [(not part.isdigit(), int(part) if part.isdigit() else 0, part) for part in str(node_id).split(":")]
+
+
 def _lora_stem(name: str) -> str:
     """Base name of a LoRA without folder and weight-file extension."""
     base = re.split(r"[\\/]", name.strip())[-1]
@@ -521,6 +581,8 @@ class Walker:
             return self._switch(hop, SWITCHES[hop.class_type])
         if signal == COND:
             return self._next_cond(hop)
+        if signal == IMAGE:
+            return self._next_image(hop)
         if signal == MODEL:
             return self._edges(hop, "model") or self._edges(hop, "model1", "model2") or None
         if signal == LATENT:
@@ -570,6 +632,19 @@ class Walker:
         if _is_size_source(hop.class_type, hop.inputs):
             return None
         for key in LATENT_INPUTS:
+            if _is_ref(hop.inputs.get(key)):
+                return self._edges(hop, key)
+        return None
+
+    def _next_image(self, hop: Hop):
+        """
+        The way back from a picture to where it was made: through image nodes (``IMAGE_INPUTS``),
+        decoders, encoders and samplers (``LATENT_INPUTS``), to the first node that has none of
+        them connected (an empty latent, a loaded image). Every node takes its first connected input.
+        """
+        if _is_empty_latent(hop.class_type):
+            return None
+        for key in IMAGE_INPUTS + LATENT_INPUTS:
             if _is_ref(hop.inputs.get(key)):
                 return self._edges(hop, key)
         return None
@@ -957,8 +1032,60 @@ def _safe(func, default):
         return default
 
 
+def _find_output_sampler(walker: Walker):
+    """
+    The sampler the saved pictures come from, as ``(node_id, node, reason)``, or None.
+
+    Starts at the output nodes: save nodes first (known classes, then any node with an
+    ``images`` input that nothing uses), preview nodes only when no save node leads to a
+    sampler; by node id within each group. The first output node with a sampler behind it
+    decides. From there the picture is followed back (decode, upscale, encode, …) to the
+    latent it started from. Of the samplers on that way, the first pass counts, as in A1111's
+    hires fix: the one whose latent comes from an empty-latent node. Without such a start
+    (img2img), the sampler nearest the output counts.
+    """
+    prompt = walker.prompt
+    nodes = {
+        nid: node
+        for nid, node in prompt.items()
+        if isinstance(node, dict) and isinstance(node.get("class_type"), str) and isinstance(node.get("inputs"), dict)
+    }
+    used = {str(val[0]) for node in nodes.values() for val in node["inputs"].values() if _is_ref(val)}
+    saves, others, previews = [], [], []
+    for nid, node in sorted(nodes.items(), key=lambda item: _id_key(item[0])):
+        cls = node["class_type"]
+        if cls in SAVE_CLASSES:
+            saves.append((nid, node, SAVE_CLASSES[cls]))
+        elif _is_ref(node["inputs"].get("images")):
+            if cls in PREVIEW_CLASSES:
+                previews.append((nid, node, "images"))
+            elif nid not in used:
+                others.append((nid, node, "images"))
+    for nid, node, key in saves + others + previews:
+        walker.log(f"output #{nid} {node['class_type']}")
+        samplers, start = [], None
+        for hop in walker.walk(node["inputs"].get(key), IMAGE):
+            if _sampler_kind(hop.class_type, hop.inputs):
+                samplers.append(hop)
+            start = hop
+        if not samplers:
+            continue
+        if start.terminal and _is_empty_latent(start.class_type):
+            return samplers[-1].node_id, prompt[samplers[-1].node_id], (
+                f"first pass: its latent starts at #{start.node_id} {start.class_type}"
+            )
+        return samplers[0].node_id, prompt[samplers[0].node_id], (
+            "nearest to the output: no empty latent at the start of its way back"
+        )
+    return None
+
+
 def _find_sampler(prompt: dict):
-    """The primary sampler node as ``(node_id, node)``, or None."""
+    """
+    The sampler when no output node leads to one, as ``(node_id, node)``, or None: the
+    first of the known KSampler classes in the graph (``KSampler`` and ``KSamplerAdvanced``
+    before the variants), else the first node by id that has a sampler's inputs.
+    """
     sampler_nodes = [
         (nid, node)
         for nid, node in prompt.items()
@@ -966,21 +1093,25 @@ def _find_sampler(prompt: dict):
         and isinstance(node.get("class_type"), str)
         and node["class_type"] in SAMPLER_CLASSES
     ]
-    if not sampler_nodes:
-        return None
-    # Prefer KSampler / KSamplerAdvanced over specialised variants
-    return next(
-        ((nid, n) for nid, n in sampler_nodes if n.get("class_type") in ("KSampler", "KSamplerAdvanced")),
-        sampler_nodes[0],
-    )
+    if sampler_nodes:
+        # Prefer KSampler / KSamplerAdvanced over specialised variants
+        return next(
+            ((nid, n) for nid, n in sampler_nodes if n.get("class_type") in ("KSampler", "KSamplerAdvanced")),
+            sampler_nodes[0],
+        )
+    for nid, node in sorted(prompt.items(), key=lambda item: _id_key(item[0])):
+        if isinstance(node, dict) and isinstance(node.get("class_type"), str) and isinstance(node.get("inputs"), dict):
+            if _sampler_kind(node["class_type"], node["inputs"]):
+                return nid, node
+    return None
 
 
 def _ksampler_sources(inputs: dict) -> dict:
     """
-    Where a KSampler-like node keeps what the extraction needs: edges for
-    ``positive``, ``negative``, ``model`` and ``latent``, and for each scalar its
-    stored value (a literal or an edge) together with the name of the field.
-    A sampler of another shape gets its own function like this one.
+    Where a sampler keeps what the extraction needs: edges for ``positive``,
+    ``negative``, ``model`` and ``latent``, and for each scalar its stored value (a
+    literal or an edge) together with the name of the field. A sampler of another
+    shape gets its own function like this one.
     """
     # KSamplerAdvanced and its variants name the seed ``noise_seed``.
     seed_key = "noise_seed" if "noise_seed" in inputs else "seed"
@@ -1030,21 +1161,25 @@ def _extract_fields(walker: Walker, src: dict) -> dict:
 def _extract(prompt, trace: list | None):
     if not isinstance(prompt, dict):
         return None
-    primary = _find_sampler(prompt)
-    if primary is None:
-        return None
-    nid, node = primary
-    inputs = node.get("inputs")
     walker = Walker(prompt, trace)
-    walker.log(f"sampler #{nid} {node['class_type']}")
-    return _extract_fields(walker, _ksampler_sources(inputs if isinstance(inputs, dict) else {}))
+    walker.log("[sampler]")
+    found = _safe(lambda: _find_output_sampler(walker), None)
+    if found is None:
+        fallback = _find_sampler(prompt)
+        if fallback is None:
+            return None
+        found = (*fallback, "no output node leads to a sampler")
+    nid, node, reason = found
+    walker.log(f"sampler #{nid} {node['class_type']} ({reason})")
+    return _extract_fields(walker, _ksampler_sources(node["inputs"] if isinstance(node.get("inputs"), dict) else {}))
 
 
 def extract_from_prompt(prompt: dict) -> dict | None:
     """
-    Find the primary sampler node in the ComfyUI graph and extract all relevant
-    generation parameters. Returns None when no sampler node is found or the
-    input is not a prompt dict.
+    Find the sampler that made the saved picture in the ComfyUI graph and extract all
+    relevant generation parameters. Returns None when no sampler node is found or the
+    input is not a prompt dict. Which sampler counts: see ``_find_output_sampler``
+    (without an output node leading to one, ``_find_sampler``).
 
     ``prompt`` is the parsed ComfyUI API prompt (node id -> {"class_type", "inputs"}).
     The returned dict always has these keys; a value that cannot be resolved (or

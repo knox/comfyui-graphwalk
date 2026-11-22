@@ -34,3 +34,18 @@ def basic_graph(model_ref=None, **sampler_overrides):
         "4": node("EmptyLatentImage", width=512, height=768, batch_size=1),
         "9": node("KSampler", **sampler),
     }
+
+
+def with_output(graph, sampler="9", save_class="SaveImage", decode="20", save="21"):
+    """Add VAEDecode and a save node behind the sampler ``sampler`` (the checkpoint's VAE is node 1, slot 2)."""
+    graph[decode] = node("VAEDecode", samples=ref(sampler), vae=ref(1, 2))
+    graph[save] = node(save_class, images=ref(decode), filename_prefix="apple")
+    return graph
+
+
+def ksampler(latent, seed=123, **overrides):
+    """A KSampler on the graph of ``basic_graph`` (nodes 1, 2, 3) taking its latent from ``latent``."""
+    inputs = dict(model=ref(1), positive=ref(2), negative=ref(3), latent_image=latent, seed=seed, steps=20, cfg=7.5,
+                  sampler_name="euler", scheduler="normal", denoise=1.0)
+    inputs.update(overrides)
+    return node("KSampler", **inputs)
